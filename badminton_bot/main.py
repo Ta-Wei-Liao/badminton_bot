@@ -9,9 +9,10 @@ from services.zhongshan_sports_center_webservice import ZhongshanSportsCenterWeb
 
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
 UPCOMING_THURSDAY_DATE = (
-    datetime.today() +
-    timedelta(days=(BOOKING_WEEKDAY - (datetime.today().isoweekday() % 7)))
+    datetime.today()
+    + timedelta(days=(BOOKING_WEEKDAY - (datetime.today().isoweekday() % 7)))
 ).replace(hour=0, minute=0, second=0, microsecond=0)  # 這次搶場地的時間
+
 
 async def main():
     set_logger()
@@ -30,19 +31,20 @@ async def main():
                         year=UPCOMING_THURSDAY_DATE.year,
                         month=UPCOMING_THURSDAY_DATE.month,
                         day=UPCOMING_THURSDAY_DATE.day + 14,
-                        hour=20
+                        hour=20,
                     ),
                     service.booking_courts(
                         session=session,
                         year=UPCOMING_THURSDAY_DATE.year,
                         month=UPCOMING_THURSDAY_DATE.month,
                         day=UPCOMING_THURSDAY_DATE.day + 14,
-                        hour=21
-                    )
+                        hour=21,
+                    ),
                 ]
                 await asyncio.gather(*tasks)
         else:
             logging.error("登入失敗！")
+
 
 def set_logger(debug_mode: bool = False) -> None:
     """設定 logging 的基本配置"""
@@ -52,9 +54,9 @@ def set_logger(debug_mode: bool = False) -> None:
         log_level = logging.INFO
 
     logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(levelname)s - %(message)s"
+        level=log_level, format="%(asctime)s - %(levelname)s - %(message)s"
     )
+
 
 def count_down() -> None:
     current_time = datetime.now()
@@ -70,11 +72,12 @@ def count_down() -> None:
 
         current_time = datetime.now()
 
+
 def is_time_up(current_time: datetime) -> bool:
     return (
-        current_time.day == UPCOMING_THURSDAY_DATE.day and
-        current_time.hour == UPCOMING_THURSDAY_DATE.hour and
-        current_time.minute == UPCOMING_THURSDAY_DATE.minute
+        current_time.day == UPCOMING_THURSDAY_DATE.day
+        and current_time.hour == UPCOMING_THURSDAY_DATE.hour
+        and current_time.minute == UPCOMING_THURSDAY_DATE.minute
     )
 
 
