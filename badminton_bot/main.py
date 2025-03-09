@@ -1,3 +1,5 @@
+"""Main entry point to execute the program"""
+
 import asyncio
 import logging
 from datetime import datetime, timedelta
@@ -14,6 +16,8 @@ UPCOMING_THURSDAY_DATE = (
 
 
 async def main():
+    """搶球場主程式的進入點，倒數計時後搶球場
+    """
     set_logger()
 
     with ZhongshanSportsCenterWebService(username="OOO", password="XXX") as service:
@@ -58,6 +62,8 @@ def set_logger(debug_mode: bool = False) -> None:
 
 
 def count_down() -> None:
+    """倒數計時到指定日期的半夜十二點
+    """
     current_time = datetime.now()
     while not is_time_up(current_time=current_time):
         if current_time.microsecond == 0:
@@ -73,6 +79,14 @@ def count_down() -> None:
 
 
 def is_time_up(current_time: datetime) -> bool:
+    """檢查指定日期的半夜十二點到了沒的函式
+
+    Args:
+        current_time (datetime): 現在的時間
+
+    Returns:
+        bool: 時間到回傳 True，還沒到回傳 False
+    """
     return (
         current_time.day == UPCOMING_THURSDAY_DATE.day
         and current_time.hour == UPCOMING_THURSDAY_DATE.hour

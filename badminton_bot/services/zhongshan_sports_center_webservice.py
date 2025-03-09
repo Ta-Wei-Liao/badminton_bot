@@ -34,6 +34,8 @@ class ZhongshanSportsCenterWebService:
         self.logout()
 
     def login(self) -> None:
+        """輸入帳密並且登入網路預約平台
+        """
         if self.__is_login:
             welcome_message = self.__driver.find_element(
                 By.XPATH, "//span[@id='lab_Name']"
@@ -71,12 +73,14 @@ class ZhongshanSportsCenterWebService:
             )
             self.__is_login = True
             logging.info("%s 登入成功!", welcome_message.text)
-        except:
+        except Exception:
             login_fail_element = self.__driver.find_element(By.ID, "showerror3")
             logging.error("%s", login_fail_element.text)
             self.__is_login = False
 
     def logout(self) -> None:
+        """登出網路預約平台
+        """
         if not self.__is_login:
             logging.error("已是登出狀態")
 
@@ -106,6 +110,11 @@ class ZhongshanSportsCenterWebService:
         return self.__is_login
 
     def get_cookies(self) -> dict[str, str] | None:
+        """取得登入後 session 中的 cookies
+
+        Returns:
+            dict[str, str] | None: 未登入的話回傳空，有登入則回傳所有 cookies
+        """
         if not self.__is_login:
             logging.error("未登入，無法取得 cookies")
 
@@ -115,6 +124,18 @@ class ZhongshanSportsCenterWebService:
     async def booking_courts(
         self, session: aiohttp.ClientSession, year: int, month: int, day: int, hour: int
     ) -> None:
+        """發出搶場地的請求，並且檢查回傳的內容中重導向的網址中的參數來判斷是否預約成功
+
+        Args:
+            session (aiohttp.ClientSession): 輸入登入資訊相關 cookies 的非同步 session
+            year (int): 指定要搶的場地的年份
+            month (int): 指定要搶的場地的月份
+            day (int): 指定要搶的場地的日期
+            hour (int): 指定要搶的場地的小時
+
+        Raises:
+            RuntimeError: 判斷不出來搶場地的結果時發出的例外
+        """
         logging.info("搶 %d/%d/%d %d ~ %d 的場地", year, month, day, hour, hour + 1)
 
         # 產生搶場地 url
@@ -133,6 +154,3 @@ class ZhongshanSportsCenterWebService:
                 )
             else:
                 raise RuntimeError(f"搶場地未知的結果:\n {text}")
-
-        # 成功 url:https://scr.cyc.org.tw/tp01.aspx?module=net_booking&files=booking_place&PT=1&X=1&Y=308362&StepFlag=3
-        # 失敗 url:https://scr.cyc.org.tw/tp01.aspx?module=net_booking&files=booking_place&PT=1&X=2&Y=0&StepFlag=3
