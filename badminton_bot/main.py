@@ -13,6 +13,8 @@ UPCOMING_THURSDAY_DATE = (
     datetime.today()
     + timedelta(days=(BOOKING_WEEKDAY - (datetime.today().isoweekday() % 7)))
 ).replace(hour=0, minute=0, second=0, microsecond=0)  # 這次搶場地的時間
+FIRST_BOOKING_DATE = (UPCOMING_THURSDAY_DATE + timedelta(days=14)).replace(hour=20)
+SECOND_BOOKING_DATE = (UPCOMING_THURSDAY_DATE + timedelta(days=14)).replace(hour=21)
 
 
 async def main():
@@ -20,6 +22,26 @@ async def main():
     """
     set_logger()
 
+    national_id = input("請輸入你的身分證字號：")
+    password = input("請輸入密碼：")
+
+    is_booking_info_confirmed = input(
+        f"\n身分證號碼：{national_id}\n"
+        f"密碼：{password}\n"
+        f"預定開搶時間：{UPCOMING_THURSDAY_DATE}\n"
+        f"預計預約時段：{FIRST_BOOKING_DATE} & {SECOND_BOOKING_DATE}\n"
+        f"請確認以上搶球場資訊是否正確？ Y/N："
+    )
+
+    if is_booking_info_confirmed == "Y":
+        logging.info("預約資訊已確認，繼續執行程式")
+    elif is_booking_info_confirmed == "N":
+        logging.info("預約資訊不正確，終止程式。")
+        return
+    else:
+        raise RuntimeError("確認預約資訊請輸入大寫 Y 或者 N。")
+
+    breakpoint()
     with ZhongshanSportsCenterWebService(username="OOO", password="XXX") as service:
         if service.login_status:
             cookies = service.get_cookies()
@@ -31,17 +53,17 @@ async def main():
                 tasks = [
                     service.booking_courts(
                         session=session,
-                        year=UPCOMING_THURSDAY_DATE.year,
-                        month=UPCOMING_THURSDAY_DATE.month,
-                        day=UPCOMING_THURSDAY_DATE.day + 14,
-                        hour=20,
+                        year=FIRST_BOOKING_DATE.year,
+                        month=FIRST_BOOKING_DATE.month,
+                        day=FIRST_BOOKING_DATE.day,
+                        hour=FIRST_BOOKING_DATE.hour,
                     ),
                     service.booking_courts(
                         session=session,
-                        year=UPCOMING_THURSDAY_DATE.year,
-                        month=UPCOMING_THURSDAY_DATE.month,
-                        day=UPCOMING_THURSDAY_DATE.day + 14,
-                        hour=21,
+                        year=SECOND_BOOKING_DATE.year,
+                        month=SECOND_BOOKING_DATE.month,
+                        day=SECOND_BOOKING_DATE.day,
+                        hour=SECOND_BOOKING_DATE.hour,
                     ),
                 ]
                 await asyncio.gather(*tasks)
