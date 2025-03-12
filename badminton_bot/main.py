@@ -41,7 +41,6 @@ async def main():
     else:
         raise RuntimeError("確認預約資訊請輸入大寫 Y 或者 N。")
 
-    breakpoint()
     with ZhongshanSportsCenterWebService(username="OOO", password="XXX") as service:
         if service.login_status:
             cookies = service.get_cookies()
