@@ -41,7 +41,7 @@ async def main():
     else:
         raise RuntimeError("確認預約資訊請輸入大寫 Y 或者 N。")
 
-    with ZhongshanSportsCenterWebService(username="OOO", password="XXX") as service:
+    with ZhongshanSportsCenterWebService(username=national_id, password=password) as service:
         if service.login_status:
             cookies = service.get_cookies()
             async with aiohttp.ClientSession(cookies=cookies) as session:
