@@ -33,13 +33,16 @@ async def main():
         f"請確認以上搶球場資訊是否正確？ Y/N："
     )
 
-    if is_booking_info_confirmed == "Y":
-        logging.info("預約資訊已確認，繼續執行程式")
-    elif is_booking_info_confirmed == "N":
-        logging.info("預約資訊不正確，終止程式。")
-        return
-    else:
-        raise RuntimeError("確認預約資訊請輸入大寫 Y 或者 N。")
+    while True:
+        if is_booking_info_confirmed == "Y":
+            logging.info("預約資訊已確認，繼續執行程式")
+            break
+        elif is_booking_info_confirmed == "N":
+            logging.info("預約資訊不正確，終止程式。")
+            return
+        else:
+            is_booking_info_confirmed = input("請輸入 Y/N 確認預約資訊是否正確：")
+            continue
 
     with ZhongshanSportsCenterWebService(username=national_id, password=password) as service:
         if service.login_status:
