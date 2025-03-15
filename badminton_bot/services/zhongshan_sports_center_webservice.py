@@ -5,6 +5,7 @@ import logging
 import aiohttp
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 
 
@@ -13,14 +14,28 @@ class ZhongshanSportsCenterWebService:
         self.__is_login = False
         self.__username = username
         self.__password = password
+        options = self.get_default_chrome_options()
 
         logging.info("開啟 Chrome 瀏覽器")
-        self.__driver = webdriver.Chrome()
+        self.__driver = webdriver.Chrome(options=options)
 
         logging.info("開啟中山運動中心登入頁")
         self.__driver.get(
             "https://scr.cyc.org.tw/tp01.aspx?module=login_page&files=login"
         )
+
+    def get_default_chrome_options(self) -> Options:
+        """Setting default chrome browser options and return
+
+        Returns:
+            Options: Chrome options object
+        """
+        options = webdriver.ChromeOptions()
+
+        # run chrome browser without UI
+        options.add_argument("--headless")
+
+        return options
 
     def __del__(self) -> None:
         logging.info("關閉瀏覽器")
