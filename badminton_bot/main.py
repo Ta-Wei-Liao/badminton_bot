@@ -11,7 +11,7 @@ from services.zhongshan_sports_center_webservice import ZhongshanSportsCenterWeb
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
 UPCOMING_THURSDAY_DATE = (
     datetime.today()
-    + timedelta(days=(BOOKING_WEEKDAY - (datetime.today().isoweekday() % 7)))
+    + timedelta(days=((BOOKING_WEEKDAY - datetime.today().isoweekday()) % 7))
 ).replace(hour=0, minute=0, second=0, microsecond=0)  # 這次搶場地的時間
 FIRST_BOOKING_DATE = (UPCOMING_THURSDAY_DATE + timedelta(days=14)).replace(hour=20)
 SECOND_BOOKING_DATE = (UPCOMING_THURSDAY_DATE + timedelta(days=14)).replace(hour=21)
