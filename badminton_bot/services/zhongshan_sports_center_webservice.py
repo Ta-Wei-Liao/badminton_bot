@@ -35,6 +35,9 @@ class ZhongshanSportsCenterWebService:
         # run chrome browser without UI
         options.add_argument("--headless")
 
+        # 模擬真實瀏覽器
+        options.add_argument("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
+
         return options
 
     def __del__(self) -> None:
