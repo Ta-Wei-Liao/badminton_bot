@@ -57,7 +57,9 @@ async def main():
                     "(輸入格式為 YYYY-mm-ddTHH:MM:SS，可輸入多個時段，用 , 分隔，不要有空格，"
                     "例：2025-04-12T15:00:00,2025-04-12T16:00:00)\n"
                 )
-                booking_periods = parse_input_booking_periods_str(input_booking_periods_str=input_booking_periods_str)
+                booking_periods = parse_input_booking_periods_str(
+                    input_booking_periods_str=input_booking_periods_str
+                )
             except ValueError:
                 logging.error("輸入日期格式不正確，請重新輸入")
                 continue
@@ -92,7 +94,11 @@ async def main():
             cookies = service.get_cookies()
             async with aiohttp.ClientSession(cookies=cookies) as session:
                 # 時間倒數
-                count_down(booking_date=upcoming_booking_date if dev_mode else UPCOMING_BOOKING_DATE)
+                count_down(
+                    booking_date=upcoming_booking_date
+                    if dev_mode
+                    else UPCOMING_BOOKING_DATE
+                )
 
                 # 非同步發送兩個請求
                 tasks = [
@@ -125,7 +131,9 @@ def set_logger(debug_mode: bool = False) -> None:
 def parse_input_booking_periods_str(input_booking_periods_str: str) -> tuple[datetime]:
     date_str_list = input_booking_periods_str.split(",")
 
-    return tuple([datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S") for date_str in date_str_list])
+    return tuple(
+        [datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S") for date_str in date_str_list]
+    )
 
 
 def count_down(booking_date: datetime) -> None:
