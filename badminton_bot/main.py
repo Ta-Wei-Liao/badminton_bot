@@ -7,7 +7,12 @@ from datetime import datetime, timedelta
 import aiohttp
 
 from services.zhongshan_sports_center_webservice import ZhongshanSportsCenterWebService
-from utils.input_helper import get_valid_input
+from utils.input_helper import (
+    get_valid_input,
+    parse_input_booking_periods_str,
+    transform_yes_no_input,
+    check_if_target_datetime_is_outdated,
+)
 
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
 UPCOMING_BOOKING_DATE = (
@@ -35,8 +40,10 @@ async def main():
     if dev_mode:
         upcoming_booking_date = get_valid_input(
             prompt="\n指定開搶時間(輸入格式為 YYYY-mm-ddTHH:MM:SS，例： 2025-04-12T15:00:00)\n：",
-            transform_func=lambda x: datetime.strptime(x, "%Y-%m-%dT%H:%M:%S"),
-            error_hint="輸入日期格式不正確，請重新輸入",
+            transform_func=lambda x: check_if_target_datetime_is_outdated(
+                target_datetime=datetime.strptime(x, "%Y-%m-%dT%H:%M:%S")
+            ),
+            error_hint="輸入日期不正確，請重新輸入",
         )
         booking_periods = get_valid_input(
             prompt=(
@@ -45,7 +52,7 @@ async def main():
                 "例：2025-04-12T15:00:00,2025-04-12T16:00:00)\n："
             ),
             transform_func=parse_input_booking_periods_str,
-            error_hint="輸入日期格式不正確，請重新輸入",
+            error_hint="輸入日期不正確，請重新輸入",
         )
     else:
         upcoming_booking_date = UPCOMING_BOOKING_DATE
@@ -107,38 +114,6 @@ def set_logger(debug_mode: bool = False) -> None:
 
     logging.basicConfig(
         level=log_level, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-
-
-def transform_yes_no_input(yes_no_input: str) -> bool:
-    """transform input Y or N string to boolean value
-
-    Args:
-        yes_no_input (str): the input string from user
-
-    Returns:
-        bool: if input Y then return True, if input N then return False
-    """
-    assert yes_no_input in ("Y", "N"), "輸入不是 Y/N"
-
-    return yes_no_input == "Y"
-
-
-def parse_input_booking_periods_str(
-    input_booking_periods_str: str,
-) -> tuple[datetime, ...]:
-    """parse multiple datetime formatted strings seperated by comma to tuple of datetime objects
-
-    Args:
-        input_booking_periods_str (str): user input string representing multiple datetime
-
-    Returns:
-        tuple[datetime, ...]: transformed multiple datetime objects in tuple
-    """
-    date_str_list = input_booking_periods_str.split(",")
-
-    return tuple(
-        [datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S") for date_str in date_str_list]
     )
 
 
