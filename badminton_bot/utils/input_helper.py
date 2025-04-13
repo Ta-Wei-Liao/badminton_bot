@@ -44,13 +44,12 @@ def parse_input_booking_periods_str(
 
     for date_str in input_booking_periods_str.split(","):
         tmp_datetime = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S")
-        check_if_target_datetime_is_outdated(target_datetime=tmp_datetime)
-        datetime_list.append(tmp_datetime)
+        datetime_list.append(check_if_target_datetime_is_outdated(target_datetime=tmp_datetime))
 
     return tuple(datetime_list)
 
 
-def check_if_target_datetime_is_outdated(target_datetime: datetime) -> None:
+def check_if_target_datetime_is_outdated(target_datetime: datetime) -> datetime:
     """check if the input datetime is in the pass and raise error
 
     Args:
@@ -58,6 +57,11 @@ def check_if_target_datetime_is_outdated(target_datetime: datetime) -> None:
 
     Raises:
         ValueError: if the input datetime is in the pass, raise this error
+
+    Returns:
+        datetime: the original input datetime
     """
     if target_datetime < datetime.now():
         raise ValueError("目標時間早於當下時間")
+    
+    return target_datetime
