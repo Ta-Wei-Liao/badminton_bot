@@ -76,13 +76,16 @@ async def main():
     else:
         logging.info("預約資訊已確認，繼續執行程式")
 
+    # 時間倒數至開始搶票的前五分鐘，再開始登入動作，避免登入太久導致 session 過期
+    count_down(booking_date=upcoming_booking_date, offset=timedelta(minutes=-5))
+
     with ZhongshanSportsCenterWebService(
         username=national_id, password=password
     ) as service:
         if service.login_status:
             cookies = service.get_cookies()
             async with aiohttp.ClientSession(cookies=cookies) as session:
-                # 時間倒數
+                # 時間倒數至開始搶票的時間
                 count_down(booking_date=upcoming_booking_date)
 
                 # 非同步發送兩個請求
@@ -117,14 +120,19 @@ def set_logger(debug_mode: bool = False) -> None:
     )
 
 
-def count_down(booking_date: datetime) -> None:
-    """count down to the midnight of the booking date
+def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
+    """Count down to the target_time (which is booking_date plus offset timedelta),
+    but always show the remaining seconds to the specified booking date.
 
     Args:
         booking_date (datetime): specified date to book the court
+        offset (timedelta, optional): _description_. Defaults to timedelta().
     """
     current_time = datetime.now()
-    while not is_time_up(current_time=current_time, booking_date=booking_date):
+    count_down_target_time = booking_date + offset
+    while not is_time_up(
+        current_time=current_time, booking_date=count_down_target_time
+    ):
         if current_time.microsecond == 0:
             delta_seconds = (booking_date - current_time).seconds
             if delta_seconds >= 10 and delta_seconds % 5 == 0:
