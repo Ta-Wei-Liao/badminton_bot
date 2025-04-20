@@ -35,6 +35,11 @@ class ZhongshanSportsCenterWebService:
         # run chrome browser without UI
         options.add_argument("--headless")
 
+        # 模擬真實瀏覽器
+        options.add_argument(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+        )
+
         return options
 
     def __del__(self) -> None:
@@ -49,8 +54,7 @@ class ZhongshanSportsCenterWebService:
         self.logout()
 
     def login(self) -> None:
-        """輸入帳密並且登入網路預約平台
-        """
+        """輸入帳密並且登入網路預約平台"""
         if self.__is_login:
             welcome_message = self.__driver.find_element(
                 By.XPATH, "//span[@id='lab_Name']"
@@ -94,8 +98,7 @@ class ZhongshanSportsCenterWebService:
             self.__is_login = False
 
     def logout(self) -> None:
-        """登出網路預約平台
-        """
+        """登出網路預約平台"""
         if not self.__is_login:
             logging.error("已是登出狀態")
 
