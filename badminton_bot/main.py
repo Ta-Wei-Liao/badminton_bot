@@ -146,18 +146,18 @@ def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
 
 
 def is_time_up(current_time: datetime, booking_date: datetime) -> bool:
-    """檢查指定日期的半夜十二點到了沒的函式
+    """check if current_time is equal to or later than booking_date
 
     Args:
         current_time (datetime): 現在的時間
 
     Returns:
-        bool: 時間到回傳 True，還沒到回傳 False
+        bool: return True if current_time is equal to or later than booking_date, else return False
     """
     return (
-        current_time.day == booking_date.day
-        and current_time.hour == booking_date.hour
-        and current_time.minute == booking_date.minute
+        current_time.day >= booking_date.day
+        and current_time.hour >= booking_date.hour
+        and current_time.minute >= booking_date.minute
     )
 
 
