@@ -80,7 +80,7 @@ async def main():
         transform_func=transform_yes_no_input,
         error_hint="請輸入 Y/N 確認預約資訊是否正確：",
     )
-    breakpoint()
+
     if not is_booking_info_confirmed:
         logging.info("預約資訊不正確，終止程式。")
         return
