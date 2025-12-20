@@ -12,6 +12,7 @@ from utils.input_helper import (
     parse_input_booking_periods_str,
     transform_yes_no_input,
     check_if_target_datetime_is_outdated,
+    transform_offset_milliseconds_param,
 )
 
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
@@ -39,9 +40,9 @@ async def main():
 
     if dev_mode:
         upcoming_booking_date = get_valid_input(
-            prompt="\n指定開搶時間(輸入格式為 YYYY-mm-ddTHH:MM:SS，例： 2025-04-12T15:00:00)\n：",
+            prompt="\n指定開搶時間(輸入格式為 YYYY-mm-ddTHH:MM:SS.fff，例： 2025-04-12T15:00:00.000)\n：",
             transform_func=lambda x: check_if_target_datetime_is_outdated(
-                target_datetime=datetime.strptime(x, "%Y-%m-%dT%H:%M:%S")
+                target_datetime=datetime.strptime(x, "%Y-%m-%dT%H:%M:%S.%f")
             ),
             error_hint="輸入日期不正確，請重新輸入",
         )
@@ -55,7 +56,17 @@ async def main():
             error_hint="輸入日期不正確，請重新輸入",
         )
     else:
-        upcoming_booking_date = UPCOMING_BOOKING_DATE
+        offset_milliseconds = get_valid_input(
+            prompt=(
+                "請輸入想要偏移的毫秒數(輸入範圍為 -1000 ~ 1000，"
+                "想要提早就輸入負整數，延後就輸入正整數，不想要偏移就不輸入)："
+            ),
+            transform_func=lambda x: transform_offset_milliseconds_param(
+                input_milliseconds_param=x
+            ),
+            error_hint="輸入的偏移豪秒數不正確，請重新輸入"
+        )
+        upcoming_booking_date = UPCOMING_BOOKING_DATE + timedelta(milliseconds=offset_milliseconds)
         booking_periods = (FIRST_BOOKING_DATE, SECOND_BOOKING_DATE)
 
     is_booking_info_confirmed = get_valid_input(

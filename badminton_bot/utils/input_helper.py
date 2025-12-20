@@ -65,3 +65,30 @@ def check_if_target_datetime_is_outdated(target_datetime: datetime) -> datetime:
         raise ValueError("目標時間早於當下時間")
     
     return target_datetime
+
+
+def transform_offset_milliseconds_param(input_milliseconds_param: str) -> int:
+    """transform input into valid milliseconds param and raise error if invalid
+
+    Args:
+        input_milliseconds_param (str): input milliseconds parameter
+
+    Raises:
+        ValueError: if input can't be casted into int, raise this error
+        ValueError: if input is not between -1000 and 1000, raise this error
+
+    Returns:
+        int: casted int value of milliseconds
+    """
+    if input_milliseconds_param == "":
+        return 0
+    
+    try:
+        milliseconds = int(input_milliseconds_param)
+    except Exception:
+        raise ValueError("輸入的偏移豪秒數不是有效的整數")
+    
+    if milliseconds < -1000 or milliseconds > 1000:
+        raise ValueError("輸入的偏移豪秒數必須介於 -1000 ~ 1000 之間")
+    
+    return milliseconds
