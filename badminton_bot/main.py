@@ -141,9 +141,7 @@ def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
     """
     current_time = datetime.now()
     count_down_target_time = booking_date + offset
-    while not is_time_up(
-        current_time=current_time, booking_date=count_down_target_time
-    ):
+    while not current_time == count_down_target_time:
         if current_time.microsecond == 0:
             delta_seconds = (booking_date - current_time).seconds
             if delta_seconds >= 10 and delta_seconds % 5 == 0:
@@ -154,22 +152,6 @@ def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
                 pass
 
         current_time = datetime.now()
-
-
-def is_time_up(current_time: datetime, booking_date: datetime) -> bool:
-    """check if current_time is equal to or later than booking_date
-
-    Args:
-        current_time (datetime): 現在的時間
-
-    Returns:
-        bool: return True if current_time is equal to or later than booking_date, else return False
-    """
-    return (
-        current_time.day >= booking_date.day
-        and current_time.hour >= booking_date.hour
-        and current_time.minute >= booking_date.minute
-    )
 
 
 if __name__ == "__main__":
