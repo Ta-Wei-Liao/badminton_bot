@@ -141,7 +141,7 @@ def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
     """
     current_time = datetime.now()
     count_down_target_time = booking_date + offset
-    while not current_time == count_down_target_time:
+    while current_time < count_down_target_time:
         if current_time.microsecond == 0:
             delta_seconds = (booking_date - current_time).seconds
             if delta_seconds >= 10 and delta_seconds % 5 == 0:
