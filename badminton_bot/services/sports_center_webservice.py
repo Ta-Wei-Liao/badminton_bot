@@ -41,7 +41,7 @@ class SportsCenterWebService(ABC):
 
         return options
 
-    @property
+    @classmethod
     @abstractmethod
     def sports_center_name(self) -> str:
         """Return the sports center's name

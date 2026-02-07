@@ -9,7 +9,7 @@ class ZhongshanSportsCenterWebService(SportsCenterWebService):
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
 
-    @property
+    @classmethod
     def sports_center_name(self) -> str:
         return "中山運動中心"
 
