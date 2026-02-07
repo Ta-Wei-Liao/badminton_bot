@@ -87,7 +87,7 @@ async def main():
     else:
         logging.info("預約資訊已確認，繼續執行程式")
 
-    # 時間倒數至開始搶票的前五分鐘，再開始登入動作，避免登入太久導致 session 過期
+    # 時間倒數至開始搶票前的指定時間，再開始登入動作，避免登入太久導致 session 過期
     count_down(booking_date=upcoming_booking_date, offset=timedelta(minutes=-3))
 
     with ZhongshanSportsCenterWebService(
@@ -141,7 +141,7 @@ def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
     """
     current_time = datetime.now()
     count_down_target_time = booking_date + offset
-    while not current_time == count_down_target_time:
+    while current_time < count_down_target_time:
         if current_time.microsecond == 0:
             delta_seconds = (booking_date - current_time).seconds
             if delta_seconds >= 10 and delta_seconds % 5 == 0:
