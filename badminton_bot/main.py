@@ -8,6 +8,7 @@ import aiohttp
 
 from services.sports_center_webservice import SportsCenterWebService
 from services.zhongshan_sports_center_webservice import ZhongshanSportsCenterWebService
+from services.zhongzheng_sports_center_webservice import ZhongzhengSportsCenterWebService
 from utils.input_helper import (
     get_valid_input,
     parse_input_booking_periods_str,
@@ -25,7 +26,8 @@ UPCOMING_BOOKING_DATE = (
 FIRST_BOOKING_DATE = (UPCOMING_BOOKING_DATE + timedelta(days=14)).replace(hour=20)
 SECOND_BOOKING_DATE = (UPCOMING_BOOKING_DATE + timedelta(days=14)).replace(hour=21)
 WEBSERVICE_MAPPING = {
-    0: ZhongshanSportsCenterWebService
+    0: ZhongshanSportsCenterWebService,
+    1: ZhongzhengSportsCenterWebService
 }
 
 
