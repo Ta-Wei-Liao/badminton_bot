@@ -5,17 +5,18 @@ import logging
 from datetime import datetime, timedelta
 
 import aiohttp
-
 from services.sports_center_webservice import SportsCenterWebService
 from services.zhongshan_sports_center_webservice import ZhongshanSportsCenterWebService
-from services.zhongzheng_sports_center_webservice import ZhongzhengSportsCenterWebService
+from services.zhongzheng_sports_center_webservice import (
+    ZhongzhengSportsCenterWebService,
+)
 from utils.input_helper import (
+    cast_court_no_to_int_and_check_is_valid,
+    check_if_target_datetime_is_outdated,
     get_valid_input,
     parse_input_booking_periods_str,
-    transform_yes_no_input,
-    check_if_target_datetime_is_outdated,
     transform_offset_milliseconds_param,
-    cast_court_no_to_int_and_check_is_valid,
+    transform_yes_no_input,
 )
 
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
@@ -27,14 +28,14 @@ FIRST_BOOKING_DATE = (UPCOMING_BOOKING_DATE + timedelta(days=14)).replace(hour=2
 SECOND_BOOKING_DATE = (UPCOMING_BOOKING_DATE + timedelta(days=14)).replace(hour=21)
 WEBSERVICE_MAPPING = {
     0: ZhongshanSportsCenterWebService,
-    1: ZhongzhengSportsCenterWebService
+    1: ZhongzhengSportsCenterWebService,
 }
 
 
 async def main():
     """搶球場主程式的進入點，倒數計時後搶球場"""
     set_logger()
-    
+
     courts_list_message = ""
     for court_no, court_service in WEBSERVICE_MAPPING.items():
         courts_list_message += f"{court_service.sports_center_name()} -> {court_no}\n"
@@ -42,10 +43,9 @@ async def main():
     input_court_no = get_valid_input(
         prompt=f"\n{courts_list_message}請輸入編號指定要預約的運動中心，運動中心編號清單如上：",
         transform_func=lambda x: cast_court_no_to_int_and_check_is_valid(
-                input_court_no=x,
-                mapping_dict=WEBSERVICE_MAPPING
-            ),
-        error_hint="請輸入正確的運動中心編號"
+            input_court_no=x, mapping_dict=WEBSERVICE_MAPPING
+        ),
+        error_hint="請輸入正確的運動中心編號",
     )
     national_id = get_valid_input(
         prompt="請輸入你的身分證字號：", transform_func=lambda x: x
@@ -83,9 +83,11 @@ async def main():
             transform_func=lambda x: transform_offset_milliseconds_param(
                 input_milliseconds_param=x
             ),
-            error_hint="輸入的偏移豪秒數不正確，請重新輸入"
+            error_hint="輸入的偏移豪秒數不正確，請重新輸入",
         )
-        upcoming_booking_date = UPCOMING_BOOKING_DATE + timedelta(milliseconds=offset_milliseconds)
+        upcoming_booking_date = UPCOMING_BOOKING_DATE + timedelta(
+            milliseconds=offset_milliseconds
+        )
         booking_periods = (FIRST_BOOKING_DATE, SECOND_BOOKING_DATE)
 
     is_booking_info_confirmed = get_valid_input(
@@ -110,9 +112,7 @@ async def main():
     count_down(booking_date=upcoming_booking_date, offset=timedelta(minutes=-3))
 
     webservice = webservice_factory(court_no=input_court_no)
-    with webservice(
-        username=national_id, password=password
-    ) as service:
+    with webservice(username=national_id, password=password) as service:
         if service.login_status:
             cookies = service.get_cookies()
             async with aiohttp.ClientSession(cookies=cookies) as session:
@@ -191,6 +191,7 @@ def webservice_factory(court_no: int) -> SportsCenterWebService:
         return WEBSERVICE_MAPPING.get(court_no)
     else:
         raise ValueError("無效的運動中心編號")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
