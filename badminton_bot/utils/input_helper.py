@@ -92,3 +92,15 @@ def transform_offset_milliseconds_param(input_milliseconds_param: str) -> int:
         raise ValueError("輸入的偏移豪秒數必須介於 -1000 ~ 1000 之間")
     
     return milliseconds
+
+
+def cast_court_no_to_int_and_check_is_valid(input_court_no: str, mapping_dict: dict) -> int:
+    try:
+        input_court_no = int(input_court_no)
+    except ValueError:
+        raise ValueError("輸入參數必須為阿拉伯數字")
+    
+    if input_court_no in mapping_dict:
+        return input_court_no
+    else:
+        raise ValueError(f"輸入的運動中心編號 {input_court_no} 無效")

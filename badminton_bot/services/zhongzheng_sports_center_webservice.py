@@ -2,20 +2,21 @@
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
+
 from .sports_center_webservice import SportsCenterWebService
 
 
-class ZhongshanSportsCenterWebService(SportsCenterWebService):
+class ZhongzhengSportsCenterWebService(SportsCenterWebService):
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
 
     @classmethod
     def sports_center_name(self) -> str:
-        return "中山運動中心"
+        return "中正運動中心"
 
     @property
     def login_page_url(self) -> str:
-        return "https://scr.cyc.org.tw/tp01.aspx?module=login_page&files=login"
+        return "https://bwd.xuanen.com.tw/wd27.aspx?module=login_page&files=login"
 
     def _get_login_user_name_from_website(self) -> WebElement:
         return self._driver.find_element(By.XPATH, "//span[@id='lab_Name']")
@@ -46,7 +47,7 @@ class ZhongshanSportsCenterWebService(SportsCenterWebService):
 
     def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
         # 產生搶場地 url
-        return f"https://scr.cyc.org.tw/tp01.aspx?module=net_booking&files=booking_place&StepFlag=25&QPid=84&QTime={str(hour).zfill(2)}&PT=1&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        return f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking&files=booking_place&StepFlag=25&QPid=1199&QTime={str(hour)}&PT=1&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
 
     def _is_booking_success(self, text: str) -> bool:
         if "PT=1&X=2" in text:
