@@ -20,7 +20,7 @@ class SportsCenterWebService(ABC):
         logging.info("開啟 Chrome 瀏覽器")
         self._driver = webdriver.Chrome(options=options)
 
-        logging.info("開啟%s登入頁", self.sports_center_name)
+        logging.info("開啟%s登入頁", self.sports_center_name())
         self._driver.get(self.login_page_url)
 
     def get_default_chrome_options(self) -> Options:
