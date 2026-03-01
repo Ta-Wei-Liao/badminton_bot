@@ -7,7 +7,6 @@ from .sports_center_webservice import SportsCenterWebService
 
 
 class ZhongzhengSportsCenterWebService(SportsCenterWebService):
-
     sport_center_name = "中正運動中心"
     login_page_url = "https://bwd.xuanen.com.tw/wd27.aspx?module=login_page&files=login"
     booking_window_days = 7

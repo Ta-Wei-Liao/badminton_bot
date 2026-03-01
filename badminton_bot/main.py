@@ -88,8 +88,12 @@ async def main():
             milliseconds=offset_milliseconds
         )
         booking_periods = (
-            (UPCOMING_BOOKING_DATE + timedelta(days=webservice.booking_window_days)).replace(hour=20),
-            (UPCOMING_BOOKING_DATE + timedelta(days=webservice.booking_window_days)).replace(hour=21)
+            (
+                UPCOMING_BOOKING_DATE + timedelta(days=webservice.booking_window_days)
+            ).replace(hour=20),
+            (
+                UPCOMING_BOOKING_DATE + timedelta(days=webservice.booking_window_days)
+            ).replace(hour=21),
         )
 
     is_booking_info_confirmed = get_valid_input(

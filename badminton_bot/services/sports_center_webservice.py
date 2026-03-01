@@ -11,11 +11,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 
 class SportsCenterWebService(ABC):
-
     sport_center_name: str
     login_page_url: str
     booking_window_days: int
-
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -27,9 +25,8 @@ class SportsCenterWebService(ABC):
 
         for attr in required_attrs:
             if attr not in cls.__dict__:
-                raise TypeError(
-                    f"{cls.__name__} must define class attribute '{attr}'"
-                )
+                raise TypeError(f"{cls.__name__} must define class attribute '{attr}'")
+
     def __init__(self, username: str, password: str) -> None:
         cls = type(self)
         self.__is_login = False
