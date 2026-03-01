@@ -6,16 +6,13 @@ from .sports_center_webservice import SportsCenterWebService
 
 
 class ZhongshanSportsCenterWebService(SportsCenterWebService):
+
+    sport_center_name = "中山運動中心"
+    login_page_url = "https://scr.cyc.org.tw/tp01.aspx?module=login_page&files=login"
+    booking_window_days = 14
+
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
-
-    @classmethod
-    def sports_center_name(self) -> str:
-        return "中山運動中心"
-
-    @property
-    def login_page_url(self) -> str:
-        return "https://scr.cyc.org.tw/tp01.aspx?module=login_page&files=login"
 
     def _get_login_user_name_from_website(self) -> WebElement:
         return self._driver.find_element(By.XPATH, "//span[@id='lab_Name']")

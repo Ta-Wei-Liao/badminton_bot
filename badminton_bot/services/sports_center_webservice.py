@@ -11,7 +11,27 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 
 class SportsCenterWebService(ABC):
+
+    sport_center_name: str
+    login_page_url: str
+    booking_window_days: int
+
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        if cls is SportsCenterWebService:
+            return
+
+        required_attrs = ["sport_center_name", "login_page_url", "booking_window_days"]
+
+        for attr in required_attrs:
+            if attr not in cls.__dict__:
+                raise TypeError(
+                    f"{cls.__name__} must define class attribute '{attr}'"
+                )
     def __init__(self, username: str, password: str) -> None:
+        cls = type(self)
         self.__is_login = False
         self.__username = username
         self.__password = password
@@ -20,8 +40,8 @@ class SportsCenterWebService(ABC):
         logging.info("開啟 Chrome 瀏覽器")
         self._driver = webdriver.Chrome(options=options)
 
-        logging.info("開啟%s登入頁", self.sports_center_name())
-        self._driver.get(self.login_page_url)
+        logging.info("開啟%s登入頁", cls.sport_center_name)
+        self._driver.get(cls.login_page_url)
 
     def get_default_chrome_options(self) -> Options:
         """Setting default chrome browser options and return
@@ -41,26 +61,6 @@ class SportsCenterWebService(ABC):
 
         return options
 
-    @classmethod
-    @abstractmethod
-    def sports_center_name(self) -> str:
-        """Return the sports center's name
-
-        Returns:
-            str: Sport center name
-        """
-        pass
-
-    @property
-    @abstractmethod
-    def login_page_url(self) -> str:
-        """Return the sports center's login page url
-
-        Returns:
-            str: Sports center login page url
-        """
-        pass
-
     def __del__(self) -> None:
         logging.info("關閉瀏覽器")
         self._driver.quit()
@@ -75,9 +75,10 @@ class SportsCenterWebService(ABC):
     def login(self) -> None:
         """輸入帳密並且登入網路預約平台"""
         if self.__is_login:
+            cls = type(self)
             welcome_message = self._get_login_user_name_from_website()
             logging.error(
-                "%s，您已經登入%s網路預約系統", welcome_message, self.sports_center_name
+                "%s，您已經登入%s網路預約系統", welcome_message, cls.sport_center_name
             )
 
             return

@@ -24,9 +24,7 @@ UPCOMING_BOOKING_DATE = (
     datetime.today()
     + timedelta(days=((BOOKING_WEEKDAY - datetime.today().isoweekday()) % 7))
 ).replace(hour=0, minute=0, second=0, microsecond=0)  # 這次搶場地的時間
-FIRST_BOOKING_DATE = (UPCOMING_BOOKING_DATE + timedelta(days=14)).replace(hour=20)
-SECOND_BOOKING_DATE = (UPCOMING_BOOKING_DATE + timedelta(days=14)).replace(hour=21)
-WEBSERVICE_MAPPING = {
+WEBSERVICE_MAPPING: dict[int, SportsCenterWebService] = {
     0: ZhongshanSportsCenterWebService,
     1: ZhongzhengSportsCenterWebService,
 }
@@ -38,7 +36,7 @@ async def main():
 
     courts_list_message = ""
     for court_no, court_service in WEBSERVICE_MAPPING.items():
-        courts_list_message += f"{court_service.sports_center_name()} -> {court_no}\n"
+        courts_list_message += f"{court_service.sport_center_name} -> {court_no}\n"
 
     input_court_no = get_valid_input(
         prompt=f"\n{courts_list_message}請輸入編號指定要預約的運動中心，運動中心編號清單如上：",
@@ -57,6 +55,7 @@ async def main():
         error_hint="請輸入 Y/N 決定是否要進入開發測試模式",
     )
 
+    webservice = webservice_factory(court_no=input_court_no)
     if dev_mode:
         upcoming_booking_date = get_valid_input(
             prompt="\n指定開搶時間(輸入格式為 YYYY-mm-ddTHH:MM:SS.fff，例： 2025-04-12T15:00:00.000)\n：",
@@ -88,7 +87,10 @@ async def main():
         upcoming_booking_date = UPCOMING_BOOKING_DATE + timedelta(
             milliseconds=offset_milliseconds
         )
-        booking_periods = (FIRST_BOOKING_DATE, SECOND_BOOKING_DATE)
+        booking_periods = (
+            (UPCOMING_BOOKING_DATE + timedelta(days=webservice.booking_window_days)).replace(hour=20),
+            (UPCOMING_BOOKING_DATE + timedelta(days=webservice.booking_window_days)).replace(hour=21)
+        )
 
     is_booking_info_confirmed = get_valid_input(
         prompt=(
@@ -111,7 +113,6 @@ async def main():
     # 時間倒數至開始搶票前的指定時間，再開始登入動作，避免登入太久導致 session 過期
     count_down(booking_date=upcoming_booking_date, offset=timedelta(minutes=-3))
 
-    webservice = webservice_factory(court_no=input_court_no)
     with webservice(username=national_id, password=password) as service:
         if service.login_status:
             cookies = service.get_cookies()
