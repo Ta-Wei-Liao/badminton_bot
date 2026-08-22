@@ -23,17 +23,25 @@ Environments are managed with **pyenv-virtualenv**. The env for this repo is `ba
 pyenv activate badminton_bot          # or: pyenv virtualenv 3.11.4 badminton_bot (first time)
 pip install -r requirements.txt       # only when requirements change
 
-# Run — must be invoked as a script path, not as a module (see Import layout below)
-python badminton_bot/main.py
+# Run — from the repo root, as a module (see Import layout below)
+python -m badminton_bot.main
+
+# Test — all offline; nothing in the suite touches the live sites
+pytest
+pytest tests/test_input_helper.py                      # one file
+pytest tests/test_main.py::TestCountDown               # one class
+pytest -k "zero_pad"                                   # by name
 
 # Bundle a standalone executable into dist/main/ (macOS host)
-./bundling_scripts.sh                 # regenerates main.spec
-pyinstaller main.spec                 # rebuild from the committed spec
+./bundling_scripts.sh                 # generates main.spec, then builds
+pyinstaller main.spec                 # faster rebuild once the spec exists
 ```
+
+`main.spec`, `build/` and `dist/` are all gitignored — the spec is a build artifact of `bundling_scripts.sh`, not a source file, so bundling changes belong in that script.
 
 Requires a local Chrome + matching chromedriver on PATH (Selenium resolves the driver itself).
 
-There is no test runner, linter, or formatter configured — `tests/` contains only an empty `__init__.py`, and pytest/black/ruff are in neither `requirements.txt` nor the env. If you add tests, you are choosing the tooling; add it to `requirements.txt` at the same time.
+Tests run on **pytest** (`pytest.ini` sets `testpaths = tests`). No linter or formatter is configured — black/ruff are in neither `requirements.txt` nor the env; if you add one, add it to `requirements.txt` at the same time.
 
 ## Architecture
 
@@ -73,11 +81,15 @@ Zhongshan (`scr.cyc.org.tw/tp01.aspx`) and Zhongzheng (`bwd.xuanen.com.tw/wd27.a
 
 The real per-site differences are: host/page path, **`QPid`** (the venue/court id in the booking URL — this is what you change to target a different court), `booking_window_days`, and `QTime` padding (Zhongshan zero-pads the hour, Zhongzheng does not). When adding a third center on this platform, expect to copy an existing subclass and change little more than those.
 
-### Import layout (why `python -m` breaks)
+### Import layout
 
-`main.py` imports `from services...` / `from utils...` as **top-level** modules, not `from badminton_bot.services...`. That only resolves when `badminton_bot/` itself is on `sys.path`, which happens when running `python badminton_bot/main.py`. `python -m badminton_bot.main` fails with `ModuleNotFoundError: No module named 'services'`.
+`main.py` uses fully-qualified package imports (`from badminton_bot.services... import ...`), so it must be run as a module from the repo root: **`python -m badminton_bot.main`**. Running `python badminton_bot/main.py` fails with `ModuleNotFoundError: No module named 'badminton_bot'`, because that puts `badminton_bot/` on `sys.path` instead of the repo root.
 
-This is also why `main.spec` / `bundling_scripts.sh` pass `--add-data "./badminton_bot/services:./services"` (and the same for `utils`) — the bundle has to mirror the same flat layout. Modules *inside* `services/` use relative imports (`from .sports_center_webservice import ...`) and are unaffected.
+Because the imports are ordinary package imports, PyInstaller follows them on its own — `bundling_scripts.sh` just passes `--paths .`, with no `--add-data` copying of `services/`/`utils/`. Modules *inside* `services/` use relative imports (`from .sports_center_webservice import ...`).
+
+### Testing without touching the live sites
+
+The suite covers only the offline parts, which is deliberate (see the constraint above): input transforms, `_generate_booking_url`, `_is_booking_success`, `webservice_factory`, `count_down`, and the `__init_subclass__` contract. Service objects are built with `object.__new__(cls)` so `__init__` never runs and Chrome never launches — use that helper (`build_without_browser` in `tests/test_sports_center_webservice.py`) when adding service tests.
 
 ## Conventions
 
