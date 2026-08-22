@@ -5,12 +5,14 @@ import logging
 from datetime import datetime, timedelta
 
 import aiohttp
-from services.sports_center_webservice import SportsCenterWebService
-from services.zhongshan_sports_center_webservice import ZhongshanSportsCenterWebService
-from services.zhongzheng_sports_center_webservice import (
+from badminton_bot.services.sports_center_webservice import SportsCenterWebService
+from badminton_bot.services.zhongshan_sports_center_webservice import (
+    ZhongshanSportsCenterWebService,
+)
+from badminton_bot.services.zhongzheng_sports_center_webservice import (
     ZhongzhengSportsCenterWebService,
 )
-from utils.input_helper import (
+from badminton_bot.utils.input_helper import (
     cast_court_no_to_int_and_check_is_valid,
     check_if_target_datetime_is_outdated,
     get_valid_input,
