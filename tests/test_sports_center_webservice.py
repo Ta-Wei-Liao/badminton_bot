@@ -6,7 +6,10 @@ suite from touching the live booking sites. Only the pure parts (URL building,
 response parsing, subclass contract) are exercised.
 """
 
+from unittest.mock import Mock
+
 import pytest
+from selenium.common.exceptions import NoAlertPresentException, NoSuchElementException
 
 from badminton_bot.services.sports_center_webservice import SportsCenterWebService
 from badminton_bot.services.zhongshan_sports_center_webservice import (
@@ -101,3 +104,161 @@ class TestIsBookingSuccess:
         """The failure branch is checked first, so a page containing both is a failure."""
         service = build_without_browser(service_cls)
         assert service._is_booking_success(text="PT=1&X=2 ... PT=1&X=1") is False
+
+
+class _FakeElement:
+    """A page element that records whether it was clicked / typed into."""
+
+    def __init__(self, text: str = "測試使用者") -> None:
+        self.text = text
+        self.clicked = False
+        self.keys: list[str] = []
+
+    def is_displayed(self) -> bool:
+        return True
+
+    def click(self) -> None:
+        self.clicked = True
+
+    def send_keys(self, value: str) -> None:
+        self.keys.append(value)
+
+
+class _FakeAlert:
+    """A native JS alert that records whether it was accepted."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.accepted = False
+
+    def accept(self) -> None:
+        self.accepted = True
+
+
+class _FakeSwitchTo:
+    def __init__(self, driver: "_FakeDriver") -> None:
+        self._driver = driver
+
+    @property
+    def alert(self) -> _FakeAlert:
+        return self._driver._poll_for_alert()
+
+
+class _FakeDriver:
+    """Driver whose alerts only show up after a few polls.
+
+    登入頁的兩個 alert 是網頁載入後才跳出來的（實測約 0.5 ~ 0.9 秒），
+    所以 driver.get() 回來的當下還沒有 alert 可以切換。
+    """
+
+    def __init__(
+        self,
+        alert_texts: tuple[str, ...],
+        polls_before_each_alert: int = 1,
+        delayed_selectors: dict[str, int] | None = None,
+    ) -> None:
+        self.alerts = [_FakeAlert(text) for text in alert_texts]
+        self._polls_before_each_alert = polls_before_each_alert
+        self._polls = 0
+        self.switch_to = _FakeSwitchTo(self)
+        self.executed_scripts: list[str] = []
+        # {selector: 還要再被找幾次才會出現}，用來模擬延遲渲染的元素
+        self._delayed_selectors = dict(delayed_selectors or {})
+        self.elements: dict[str, _FakeElement] = {}
+
+    def _poll_for_alert(self) -> _FakeAlert:
+        pending = [alert for alert in self.alerts if not alert.accepted]
+        if not pending:
+            raise NoAlertPresentException("no such alert")
+
+        self._polls += 1
+        if self._polls <= self._polls_before_each_alert:
+            raise NoAlertPresentException("no such alert")
+
+        self._polls = 0
+        return pending[0]
+
+    def find_element(self, by, value):
+        remaining = self._delayed_selectors.get(value, 0)
+        if remaining > 0:
+            self._delayed_selectors[value] = remaining - 1
+            raise NoSuchElementException(f"no such element: {value}")
+
+        return self.elements.setdefault(value, _FakeElement())
+
+    def quit(self):
+        pass
+
+    def execute_script(self, script, *args):
+        self.executed_scripts.append(script)
+
+
+class TestLoginWaitsForTheAlerts:
+    """登入頁的 alert 是延遲跳出的，login() 必須真的輪詢等待，不能只看一次。"""
+
+    @staticmethod
+    def _build(service_cls, **kwargs):
+        service = build_without_browser(service_cls)
+        service._driver = _FakeDriver(
+            alert_texts=("這只是提醒！！！", "報名運動課程請使用個人帳密報名繳費"), **kwargs
+        )
+        service._SportsCenterWebService__is_login = False
+        service._SportsCenterWebService__username = "A123456789"
+        service._SportsCenterWebService__password = "secret"
+        return service
+
+    @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
+    def test_login_accepts_both_delayed_alerts(self, service_cls):
+        service = self._build(service_cls)
+
+        service.login()
+
+        assert [alert.accepted for alert in service._driver.alerts] == [True, True]
+        assert service.login_status is True
+        assert "DoSubmit()" in service._driver.executed_scripts
+
+    @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
+    def test_login_still_works_when_the_alert_is_slow(self, service_cls):
+        """就算 alert 慢了好幾次輪詢才出現，也要等到它。"""
+        service = self._build(service_cls, polls_before_each_alert=4)
+
+        service.login()
+
+        assert [alert.accepted for alert in service._driver.alerts] == [True, True]
+        assert service.login_status is True
+
+
+class TestLoginWaitsForDelayedElements:
+    """兩個 alert 關掉之後才渲染出來的元素，也必須等，不能立刻就找。"""
+
+    @staticmethod
+    def _build(service_cls, delayed_selectors):
+        service = build_without_browser(service_cls)
+        service._driver = _FakeDriver(
+            alert_texts=("這只是提醒！！！", "報名運動課程請使用個人帳密報名繳費"),
+            delayed_selectors=delayed_selectors,
+        )
+        service._SportsCenterWebService__is_login = False
+        service._SportsCenterWebService__username = "A123456789"
+        service._SportsCenterWebService__password = "secret"
+        return service
+
+    @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
+    def test_login_waits_for_the_delayed_confirm_popup(self, service_cls):
+        """詐騙提醒的 SweetAlert2 視窗在 alert 關掉後才出現（實測差約 50 毫秒）。"""
+        service = self._build(service_cls, {"swal2-actions": 3})
+
+        service.login()
+
+        assert service._driver.elements["swal2-actions"].clicked is True
+        assert service.login_status is True
+
+    @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
+    def test_login_waits_for_the_welcome_message_after_submit(self, service_cls):
+        """DoSubmit() 之後頁面要重新導向，歡迎訊息不會馬上就在 DOM 裡。"""
+        service = self._build(service_cls, {"//span[@id='lab_Name']": 3})
+
+        service.login()
+
+        assert service.login_status is True
+        assert "DoSubmit()" in service._driver.executed_scripts
