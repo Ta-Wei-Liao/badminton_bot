@@ -95,4 +95,5 @@ The suite covers only the offline parts, which is deliberate (see the constraint
 
 - Prompts, log messages, and inline comments are in **Traditional Chinese**; docstrings and identifiers are in English. Match this when editing.
 - Input validation lives in `badminton_bot/utils/input_helper.py`. `get_valid_input(prompt, transform_func, error_hint)` re-prompts forever until `transform_func` stops raising `ValueError`/`AssertionError` — new prompts should be a transform function passed to it, not a hand-rolled loop.
-- Commits use conventional-commit prefixes (`feat:`, `fix:`, `refactor:`, `style:`, `docs:`), one feature branch per change, merged into `master` via PR.
+- Commits use conventional-commit prefixes (`feat:`, `fix:`, `refactor:`, `style:`, `docs:`, `test:`), one feature branch per change, merged into `master` via PR. Do not add `Co-Authored-By` trailers.
+- **Always pass `--repo Ta-Wei-Liao/badminton_bot` to `gh`.** `origin` is the SSH config alias `git@github.com-tawei:...`, not a literal `github.com` URL, so `gh` cannot reliably infer the repository from the remote. Pass the flag rather than rewriting the remote — the alias is what selects the right SSH key (`~/.ssh/personal_id_ed25519`).
