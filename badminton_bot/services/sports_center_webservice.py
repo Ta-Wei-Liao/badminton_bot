@@ -59,8 +59,14 @@ class SportsCenterWebService(ABC):
         return options
 
     def __del__(self) -> None:
+        # 瀏覽器有可能還沒開起來就失敗，這時不需要（也無法）關閉，
+        # 否則 __del__ 拋出的 AttributeError 會蓋掉原本真正的錯誤
+        driver = getattr(self, "_driver", None)
+        if driver is None:
+            return
+
         logging.info("關閉瀏覽器")
-        self._driver.quit()
+        driver.quit()
 
     def __enter__(self):
         self.login()
