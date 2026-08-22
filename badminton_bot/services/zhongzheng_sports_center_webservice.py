@@ -43,7 +43,7 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
 
     def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
         # 產生搶場地 url
-        return f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking&files=booking_place&StepFlag=25&QPid=1200&QTime={str(hour)}&PT=1&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        return f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking&files=booking_place&StepFlag=25&QPid=1199&QTime={str(hour)}&PT=1&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
 
     def _is_booking_success(self, text: str) -> bool:
         if "PT=1&X=2" in text:
