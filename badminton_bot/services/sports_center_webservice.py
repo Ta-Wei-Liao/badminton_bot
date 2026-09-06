@@ -2,12 +2,17 @@
 
 import logging
 from abc import ABC, abstractmethod
+from typing import Callable
 
 import aiohttp
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.remote.webelement import WebElement
+from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.ui import WebDriverWait
+
+# 登入頁的提醒視窗與元素都是延遲出現的。登入本身在開搶前三分鐘執行，等久一點不影響搶場地
+LOGIN_WAIT_SECONDS = 10
 
 
 class SportsCenterWebService(ABC):
@@ -86,17 +91,21 @@ class SportsCenterWebService(ABC):
 
             return
 
-        wait = WebDriverWait(self._driver, timeout=2)
-        alert = wait.until(lambda d: d.switch_to.alert)
-        logging.debug("第一個彈出視窗訊息： %s", alert.text)
-        alert.accept()
+        # 兩個提醒視窗是頁面載入完才跳出來的（實測約 0.5 ~ 1 秒），所以要輪詢等待。
+        # 不能用 lambda d: d.switch_to.alert，WebDriverWait 預設只忽略 NoSuchElementException，
+        # alert 還沒跳出時丟的 NoAlertPresentException 會直接往外拋，等於只看了一次就放棄。
+        for order in ("第一", "第二"):
+            alert = WebDriverWait(self._driver, timeout=LOGIN_WAIT_SECONDS).until(
+                expected_conditions.alert_is_present()
+            )
+            logging.debug("%s個彈出視窗訊息： %s", order, alert.text)
+            alert.accept()
 
-        wait = WebDriverWait(self._driver, timeout=2)
-        alert = wait.until(lambda d: d.switch_to.alert)
-        logging.debug("第二個彈出視窗訊息： %s", alert.text)
-        alert.accept()
-
-        checkbox = self._find_checkbox_element()
+        # 詐騙提醒的 SweetAlert2 視窗是兩個 alert 關掉之後才渲染出來的（實測只差約 50 毫秒），
+        # find_element 沒有隱含等待，立刻找會 NoSuchElementException
+        checkbox = self._wait_for_element(
+            self._find_checkbox_element, require_displayed=True
+        )
         checkbox.click()
 
         logging.info("登入中...")
@@ -108,13 +117,44 @@ class SportsCenterWebService(ABC):
         try:
             self._driver.execute_script("DoSubmit()")
 
-            welcome_message = self._get_login_user_name_from_website()
+            # DoSubmit() 會重新導向頁面，歡迎訊息不會馬上出現在 DOM 裡，
+            # 不等的話會誤判成登入失敗
+            welcome_message = self._wait_for_element(
+                self._get_login_user_name_from_website
+            )
             self.__is_login = True
             logging.info("%s 登入成功!", welcome_message.text)
         except Exception:
             login_fail_element = self._get_login_failed_message()
             logging.error("%s", login_fail_element.text)
             self.__is_login = False
+
+    def _wait_for_element(
+        self,
+        find_element_func: Callable[[], WebElement],
+        require_displayed: bool = False,
+    ) -> WebElement:
+        """輪詢等待延遲渲染的元素出現後回傳
+
+        WebDriverWait 預設就會忽略 NoSuchElementException，所以元素還沒渲染出來時會繼續等。
+
+        Args:
+            find_element_func (Callable[[], WebElement]): 回傳目標元素的函式
+            require_displayed (bool, optional): 是否要等到元素可見（要點擊的元素才需要）。
+                Defaults to False.
+
+        Returns:
+            WebElement: 已經出現的目標元素
+        """
+
+        def _found(driver) -> WebElement | bool:
+            element = find_element_func()
+            if require_displayed and not element.is_displayed():
+                return False
+
+            return element
+
+        return WebDriverWait(self._driver, timeout=LOGIN_WAIT_SECONDS).until(_found)
 
     @abstractmethod
     def _get_login_user_name_from_website(self) -> str:
