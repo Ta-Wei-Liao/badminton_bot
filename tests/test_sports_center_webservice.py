@@ -6,6 +6,7 @@ suite from touching the live booking sites. Only the pure parts (URL building,
 response parsing, subclass contract) are exercised.
 """
 
+import asyncio
 from unittest.mock import Mock
 
 import pytest
@@ -16,7 +17,9 @@ from badminton_bot.services.sports_center_webservice import (
     SLOT_AVAILABLE,
     SLOT_TAKEN,
     SLOT_UNKNOWN,
+    BookingAttempt,
     SportsCenterWebService,
+    WarmUpResult,
     build_browser_headers,
 )
 from badminton_bot.services.zhongshan_sports_center_webservice import (
@@ -443,3 +446,185 @@ class TestChromeOptions:
         arguments = service.get_default_chrome_options().arguments
         headers = build_browser_headers(referer="https://example.invalid/list")
         assert any(headers["User-Agent"] in argument for argument in arguments)
+
+
+class FakeBookingResponse:
+    def __init__(self, body: str, headers: dict[str, str] | None = None):
+        self.body = body
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def text(self):
+        return self.body
+
+
+class RecordingSession:
+    def __init__(self, body: str = "PT=1&X=1", headers=None):
+        self.body = body
+        self.headers = headers or {}
+        self.requested_urls: list[str] = []
+        self.request_epochs: list[float] = []
+
+    def get(self, url, **kwargs):
+        import time
+
+        self.requested_urls.append(url)
+        self.request_epochs.append(time.time())
+        return FakeBookingResponse(self.body, self.headers)
+
+
+class TestBookingCourts:
+    def test_sends_the_url_it_was_handed(self):
+        """URL 在截止時刻之前就組好，開搶那一刻不做字串運算。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession()
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert session.requested_urls == ["https://example.invalid/book"]
+        assert attempt.success is True
+        assert attempt.hour == 20
+
+    def test_waits_for_the_event_before_sending(self):
+        """task 要在倒數結束前就掛好，時間到只做 event.set()。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession()
+
+        async def scenario():
+            ready = asyncio.Event()
+            task = asyncio.create_task(
+                service.booking_courts(
+                    session=session,
+                    booking_url="https://example.invalid/book",
+                    hour=20,
+                    ready_event=ready,
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert session.requested_urls == [], "還沒放行就送出了"
+            ready.set()
+            return await task
+
+        asyncio.run(scenario())
+        assert session.requested_urls == ["https://example.invalid/book"]
+
+    def test_reports_a_lost_race_without_raising(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(body="PT=1&X=2")
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert attempt.success is False
+        assert attempt.error is None
+
+    def test_an_unrecognised_response_is_recorded_not_raised(self):
+        """一發失敗絕不能連坐另一發，所以例外要收在結果物件裡。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(body="尚未開放預約")
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert attempt.success is None
+        assert attempt.error is not None
+
+    def test_records_the_send_instant_and_round_trip(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(headers={"Date": "Thu, 04 Sep 2025 16:00:00 GMT"})
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert attempt.sent_epoch > 0
+        assert attempt.rtt >= 0
+        assert attempt.server_date == "Thu, 04 Sep 2025 16:00:00 GMT"
+
+
+class TestWarmUp:
+    def test_opens_both_pages_concurrently(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(
+            body="<html></html>", headers={"Connection": "keep-alive"}
+        )
+
+        results = asyncio.run(
+            service.warm_up(session=session, year=2026, month=9, day=17)
+        )
+        assert len(results) == 2
+        assert len(session.requested_urls) == 2
+        assert all(result.ok for result in results)
+
+    def test_reports_the_keep_alive_verdict(self):
+        """若伺服器回 Connection: close，預熱就是白做，使用者必須看得見。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(
+            body="<html></html>",
+            headers={"Connection": "close", "Keep-Alive": "timeout=5"},
+        )
+
+        results = asyncio.run(
+            service.warm_up(session=session, year=2026, month=9, day=17)
+        )
+        assert results[0].connection == "close"
+        assert results[0].keep_alive == "timeout=5"
+
+    def test_returns_the_list_page_body_for_slot_inspection(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(body=LIST_PAGE_HTML)
+
+        results = asyncio.run(
+            service.warm_up(session=session, year=2026, month=9, day=17)
+        )
+        assert results[0].body == LIST_PAGE_HTML
+
+    def test_a_failed_warm_up_degrades_instead_of_raising(self):
+        """預熱失敗只是回到冷連線，不比現況差，絕不能中斷搶場地。"""
+
+        class ExplodingSession:
+            def get(self, url, **kwargs):
+                raise OSError("模擬連線中斷")
+
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        results = asyncio.run(
+            service.warm_up(session=ExplodingSession(), year=2026, month=9, day=17)
+        )
+        assert all(result.ok is False for result in results)

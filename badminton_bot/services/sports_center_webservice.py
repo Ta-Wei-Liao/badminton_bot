@@ -1,8 +1,11 @@
 """Service to interacte with Sports Center Website"""
 
+import asyncio
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Callable
 
 import aiohttp
@@ -18,6 +21,41 @@ LOGIN_WAIT_SECONDS = 10
 SLOT_AVAILABLE = "可訂"
 SLOT_TAKEN = "已訂"
 SLOT_UNKNOWN = "未知"
+
+# 連線池上限。只需要兩條熱連線，留餘裕給預熱與探測。
+CONNECTION_LIMIT = 10
+
+# DNS 快取存活秒數，讓開搶那一刻不必再解析一次。
+DNS_CACHE_SECONDS = 300
+
+# aiohttp 預設 15 秒，短於探測階段的隨機間隔（12~25 秒）。沿用預設值的話，
+# 連線會在兩次探測之間被回收，每次探測都得重新握手 —— 量到的 RTT 會被
+# 握手成本汙染，無法代表開搶時那條熱連線，連帶讓 RTT/2 的補償失準。
+KEEPALIVE_TIMEOUT_SECONDS = 60
+
+
+@dataclass
+class WarmUpResult:
+    """What one warm-up request revealed about the connection."""
+
+    url: str
+    ok: bool
+    connection: str | None = None
+    keep_alive: str | None = None
+    body: str | None = None
+
+
+@dataclass
+class BookingAttempt:
+    """One booking request, with the timings needed to tune the next run."""
+
+    hour: int
+    url: str
+    sent_epoch: float
+    rtt: float
+    server_date: str | None
+    success: bool | None
+    error: str | None
 
 # Selenium 與 aiohttp 共用同一個 UA，否則登入與搶場地會用不同身分出現在對方的 log 裡。
 BROWSER_USER_AGENT = (
@@ -264,39 +302,153 @@ class SportsCenterWebService(ABC):
         cookies = self._driver.get_cookies()
         return {cookie["name"]: cookie["value"] for cookie in cookies}
 
-    async def booking_courts(
-        self, session: aiohttp.ClientSession, year: int, month: int, day: int, hour: int
-    ) -> None:
-        """發出搶場地的請求，並且檢查回傳的內容中重導向的網址中的參數來判斷是否預約成功
+    def create_session(
+        self, cookies: dict[str, str], referer: str
+    ) -> aiohttp.ClientSession:
+        """Build the session the race runs on.
+
+        An explicit connector is what makes warming up worthwhile: the default
+        one would drop the pooled connection between probes.
 
         Args:
-            session (aiohttp.ClientSession): 輸入登入資訊相關 cookies 的非同步 session
-            year (int): 指定要搶的場地的年份
-            month (int): 指定要搶的場地的月份
-            day (int): 指定要搶的場地的日期
-            hour (int): 指定要搶的場地的小時
+            cookies (dict[str, str]): the authenticated cookies from Selenium.
+            referer (str): the page the booking requests would be clicked from.
 
-        Raises:
-            RuntimeError: 判斷不出來搶場地的結果時發出的例外
+        Returns:
+            aiohttp.ClientSession: a session with pooled, browser-looking requests.
         """
-        logging.info("搶 %d/%d/%d %d ~ %d 的場地", year, month, day, hour, hour + 1)
-
-        # 產生搶場地 url
-        booking_url = self._generate_booking_url(
-            year=year, month=month, day=day, hour=hour
+        connector = aiohttp.TCPConnector(
+            limit=CONNECTION_LIMIT,
+            ttl_dns_cache=DNS_CACHE_SECONDS,
+            keepalive_timeout=KEEPALIVE_TIMEOUT_SECONDS,
+            ssl=False,
         )
 
-        async with session.get(booking_url, ssl=False) as response:
-            text = await response.text()
+        return aiohttp.ClientSession(
+            connector=connector,
+            cookies=cookies,
+            headers=build_browser_headers(referer=referer),
+        )
 
-            if self._is_booking_success(text=text):
+    async def warm_up(
+        self, session, year: int, month: int, day: int
+    ) -> list[WarmUpResult]:
+        """Open two read-only pages so two hot connections wait in the pool.
+
+        Everything the booking request would otherwise pay for at the opening
+        instant — DNS, the TCP handshake, the TLS handshake — happens here.
+
+        Args:
+            session: the aiohttp session.
+            year (int): the target booking year.
+            month (int): the target booking month.
+            day (int): the target booking day.
+
+        Returns:
+            list[WarmUpResult]: one entry per warm-up URL, in URL order.
+        """
+        urls = self._generate_warm_up_urls(year=year, month=month, day=day)
+
+        async def _open(url: str) -> WarmUpResult:
+            try:
+                async with session.get(url) as response:
+                    body = await response.text()
+                    return WarmUpResult(
+                        url=url,
+                        ok=True,
+                        connection=response.headers.get("Connection"),
+                        keep_alive=response.headers.get("Keep-Alive"),
+                        body=body,
+                    )
+            except Exception as error:
+                logging.warning("預熱請求失敗（%s）：%s", url, error)
+                return WarmUpResult(url=url, ok=False)
+
+        results = await asyncio.gather(*(_open(url) for url in urls))
+
+        for result in results:
+            if result.ok:
                 logging.info(
-                    "%d/%d/%d %d ~ %d 的場地預約成功", year, month, day, hour, hour + 1
+                    "預熱完成：Connection=%s Keep-Alive=%s",
+                    result.connection or "（無）",
+                    result.keep_alive or "（無）",
                 )
-            else:
-                logging.info(
-                    "%d/%d/%d %d ~ %d 的場地預約失敗", year, month, day, hour, hour + 1
-                )
+                if (result.connection or "").lower() == "close":
+                    logging.warning(
+                        "伺服器要求關閉連線，預熱無效，開搶時仍需重新握手"
+                    )
+
+        return list(results)
+
+    async def booking_courts(
+        self,
+        session,
+        booking_url: str,
+        hour: int,
+        ready_event: asyncio.Event,
+    ) -> BookingAttempt:
+        """Fire one pre-built booking request the moment the event is set.
+
+        The URL is built and this coroutine is scheduled well before the
+        deadline, so the only work left at the opening instant is the send.
+
+        Never raises. An unrecognised response is recorded in the result rather
+        than thrown, because one request blowing up must not take the other
+        booking down with it.
+
+        Args:
+            session: the aiohttp session.
+            booking_url (str): the URL assembled ahead of time.
+            hour (int): the hour being booked, for logging.
+            ready_event (asyncio.Event): released at the send instant.
+
+        Returns:
+            BookingAttempt: the outcome and its timings.
+        """
+        await ready_event.wait()
+
+        sent_epoch = time.time()
+        started = time.perf_counter()
+
+        try:
+            async with session.get(booking_url) as response:
+                text = await response.text()
+                rtt = time.perf_counter() - started
+                server_date = response.headers.get("Date")
+        except Exception as error:
+            logging.error("%d 點的場地請求失敗：%s", hour, error)
+            return BookingAttempt(
+                hour=hour,
+                url=booking_url,
+                sent_epoch=sent_epoch,
+                rtt=time.perf_counter() - started,
+                server_date=None,
+                success=None,
+                error=str(error),
+            )
+
+        try:
+            success = self._is_booking_success(text=text)
+            error = None
+        except RuntimeError as runtime_error:
+            success = None
+            error = str(runtime_error)
+            logging.error("%d 點的場地回應無法判讀：%s", hour, runtime_error)
+
+        if success is True:
+            logging.info("%d ~ %d 點的場地預約成功", hour, hour + 1)
+        elif success is False:
+            logging.info("%d ~ %d 點的場地預約失敗", hour, hour + 1)
+
+        return BookingAttempt(
+            hour=hour,
+            url=booking_url,
+            sent_epoch=sent_epoch,
+            rtt=rtt,
+            server_date=server_date,
+            success=success,
+            error=error,
+        )
 
     @abstractmethod
     def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
