@@ -19,6 +19,7 @@ class SportsCenterWebService(ABC):
     sport_center_name: str
     login_page_url: str
     booking_window_days: int
+    target_qpid: int
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -26,7 +27,12 @@ class SportsCenterWebService(ABC):
         if cls is SportsCenterWebService:
             return
 
-        required_attrs = ["sport_center_name", "login_page_url", "booking_window_days"]
+        required_attrs = [
+            "sport_center_name",
+            "login_page_url",
+            "booking_window_days",
+            "target_qpid",
+        ]
 
         for attr in required_attrs:
             if attr not in cls.__dict__:
@@ -262,3 +268,24 @@ class SportsCenterWebService(ABC):
     @abstractmethod
     def _is_booking_success(self, text: str) -> bool:
         pass
+
+    @abstractmethod
+    def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
+        """唯讀的場地列表頁（StepFlag=2）。探測、預熱與狀態偵察都用這一頁。"""
+
+    def _generate_warm_up_urls(
+        self, year: int, month: int, day: int
+    ) -> tuple[str, ...]:
+        """Two read-only pages to open concurrently, leaving two hot connections.
+
+        Two connections because the two booking requests each need one. Two
+        *different* pages because a browser loading a page in parallel is
+        ordinary traffic, whereas the same URL fetched twice at once is not.
+
+        Returns:
+            tuple[str, ...]: the list page and the login page.
+        """
+        return (
+            self._generate_list_page_url(year=year, month=month, day=day),
+            type(self).login_page_url,
+        )

@@ -30,7 +30,12 @@ def build_without_browser(service_cls: type[SportsCenterWebService]):
 class TestSubclassContract:
     @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
     def test_shipped_services_declare_every_required_attribute(self, service_cls):
-        for attr in ("sport_center_name", "login_page_url", "booking_window_days"):
+        for attr in (
+            "sport_center_name",
+            "login_page_url",
+            "booking_window_days",
+            "target_qpid",
+        ):
             assert attr in service_cls.__dict__
 
     def test_subclass_missing_a_required_attribute_fails_at_definition_time(self):
@@ -262,3 +267,71 @@ class TestLoginWaitsForDelayedElements:
 
         assert service.login_status is True
         assert "DoSubmit()" in service._driver.executed_scripts
+
+
+class TestTargetQpidContract:
+    def test_both_centres_declare_their_target_court(self):
+        assert ZhongzhengSportsCenterWebService.target_qpid == 1199
+        assert ZhongshanSportsCenterWebService.target_qpid == 84
+
+    def test_a_subclass_without_target_qpid_is_rejected_at_import_time(self):
+        """__init_subclass__ 在類別定義時就擋下來，而不是等到執行期才炸。"""
+        with pytest.raises(TypeError, match="target_qpid"):
+
+            class Incomplete(SportsCenterWebService):
+                sport_center_name = "測試中心"
+                login_page_url = "https://example.invalid/login"
+                booking_window_days = 7
+
+    def test_the_booking_url_is_built_from_the_class_attribute(self):
+        """換場地應該只要改 target_qpid 一行。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        url = service._generate_booking_url(year=2026, month=9, day=17, hour=20)
+        assert f"QPid={ZhongzhengSportsCenterWebService.target_qpid}" in url
+
+
+class TestListPageUrl:
+    def test_zhongzheng_list_page_is_the_read_only_step_flag(self):
+        """StepFlag=2 是列表頁，StepFlag=25 才會真的送出預約 —— 探測絕不能碰後者。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        url = service._generate_list_page_url(year=2026, month=9, day=17)
+        assert url == (
+            "https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking"
+            "&files=booking_place&StepFlag=2&PT=1&D=2026/09/17"
+        )
+        assert "StepFlag=25" not in url
+
+    def test_zhongshan_list_page_is_the_read_only_step_flag(self):
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        url = service._generate_list_page_url(year=2026, month=9, day=17)
+        assert url == (
+            "https://scr.cyc.org.tw/tp01.aspx?module=net_booking"
+            "&files=booking_place&StepFlag=2&PT=1&D=2026/09/17"
+        )
+        assert "StepFlag=25" not in url
+
+    def test_the_date_is_zero_padded(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        url = service._generate_list_page_url(year=2026, month=1, day=5)
+        assert "D=2026/01/05" in url
+
+
+class TestWarmUpUrls:
+    def test_warms_two_different_pages(self):
+        """兩條熱連線供兩個預約請求各用一條；兩個不同頁面併發載入是一般瀏覽行為。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        urls = service._generate_warm_up_urls(year=2026, month=9, day=17)
+        assert len(urls) == 2
+        assert len(set(urls)) == 2
+
+    def test_warm_up_never_touches_the_booking_action(self):
+        for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
+            service = build_without_browser(cls)
+            for url in service._generate_warm_up_urls(year=2026, month=9, day=17):
+                assert "StepFlag=25" not in url
+
+    def test_includes_the_list_page_and_the_login_page(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        urls = service._generate_warm_up_urls(year=2026, month=9, day=17)
+        assert service._generate_list_page_url(2026, 9, 17) in urls
+        assert ZhongzhengSportsCenterWebService.login_page_url in urls

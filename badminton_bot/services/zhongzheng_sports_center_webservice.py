@@ -10,6 +10,7 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
     sport_center_name = "中正運動中心"
     login_page_url = "https://bwd.xuanen.com.tw/wd27.aspx?module=login_page&files=login"
     booking_window_days = 7
+    target_qpid = 1199  # 羽球 7-4。換場地只要改這一行。
 
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
@@ -41,9 +42,22 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
         else:
             return False
 
+    def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
+        # StepFlag=2 是唯讀列表頁，StepFlag=25 才是真的送出預約
+        return (
+            f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking"
+            f"&files=booking_place&StepFlag=2&PT=1"
+            f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        )
+
     def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
-        # 產生搶場地 url
-        return f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking&files=booking_place&StepFlag=25&QPid=1199&QTime={str(hour)}&PT=1&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        # 產生搶場地 url。中正的 QTime 不補零
+        return (
+            f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking"
+            f"&files=booking_place&StepFlag=25&QPid={type(self).target_qpid}"
+            f"&QTime={str(hour)}&PT=1"
+            f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        )
 
     def _is_booking_success(self, text: str) -> bool:
         if "PT=1&X=2" in text:
