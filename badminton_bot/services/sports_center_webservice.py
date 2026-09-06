@@ -1,6 +1,7 @@
 """Service to interacte with Sports Center Website"""
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Callable
 
@@ -13,6 +14,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 # 登入頁的提醒視窗與元素都是延遲出現的。登入本身在開搶前三分鐘執行，等久一點不影響搶場地
 LOGIN_WAIT_SECONDS = 10
+
+SLOT_AVAILABLE = "可訂"
+SLOT_TAKEN = "已訂"
+SLOT_UNKNOWN = "未知"
 
 
 class SportsCenterWebService(ABC):
@@ -272,6 +277,38 @@ class SportsCenterWebService(ABC):
     @abstractmethod
     def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
         """唯讀的場地列表頁（StepFlag=2）。探測、預熱與狀態偵察都用這一頁。"""
+
+    def parse_slot_state(self, html: str, hour: int) -> str:
+        """Read the target court's state for one hour off the read-only list page.
+
+        A bookable cell carries the site's own click handler, Step3Action(QPid,
+        QTime); a cell already taken does not. Both centres run the same ASP.NET
+        platform, so one parser serves them both. The hour is matched with an
+        optional leading zero because the two sites pad it differently.
+
+        The distinction that matters is between "taken" and "unknown": before
+        the booking window opens the page may not render that day at all, and
+        reporting that as taken would be a lie.
+
+        Args:
+            html (str): the list page body.
+            hour (int): the hour to look up.
+
+        Returns:
+            str: SLOT_AVAILABLE, SLOT_TAKEN or SLOT_UNKNOWN.
+        """
+        qpid = type(self).target_qpid
+        bookable = re.compile(
+            rf"Step3Action\(\s*{qpid}\s*,\s*0?{hour}\s*\)"
+        )
+
+        if bookable.search(html):
+            return SLOT_AVAILABLE
+
+        if str(qpid) in html:
+            return SLOT_TAKEN
+
+        return SLOT_UNKNOWN
 
     def _generate_warm_up_urls(
         self, year: int, month: int, day: int

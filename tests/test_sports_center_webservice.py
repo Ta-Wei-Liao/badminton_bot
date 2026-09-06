@@ -11,7 +11,12 @@ from unittest.mock import Mock
 import pytest
 from selenium.common.exceptions import NoAlertPresentException, NoSuchElementException
 
-from badminton_bot.services.sports_center_webservice import SportsCenterWebService
+from badminton_bot.services.sports_center_webservice import (
+    SLOT_AVAILABLE,
+    SLOT_TAKEN,
+    SLOT_UNKNOWN,
+    SportsCenterWebService,
+)
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
 )
@@ -335,3 +340,55 @@ class TestWarmUpUrls:
         urls = service._generate_warm_up_urls(year=2026, month=9, day=17)
         assert service._generate_list_page_url(2026, 9, 17) in urls
         assert ZhongzhengSportsCenterWebService.login_page_url in urls
+
+
+# 合成的 fixture，依照既有筆記寫成：可預約的格子帶 Step3Action 呼叫，
+# 已被預約的格子只有 place02 圖與 title。尚未與真實網頁核對過。
+LIST_PAGE_HTML = """
+<table>
+  <tr>
+    <td><a onclick="Step3Action(1199, 19)"><img src="img/place01.png"></a></td>
+    <td><img src="img/place02.png" title="已被預約"></td>
+    <td><a onclick="Step3Action(1199, 21)"><img src="img/place01.png"></a></td>
+    <td><a onclick="Step3Action(1196, 20)"><img src="img/place01.png"></a></td>
+  </tr>
+</table>
+"""
+
+LIST_PAGE_HTML_PADDED_HOUR = """
+<td><a onclick="Step3Action(84, 09)"><img src="img/place01.png"></a></td>
+"""
+
+
+class TestParseSlotState:
+    def test_an_open_slot_is_reported_available(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=19) == SLOT_AVAILABLE
+
+    def test_a_slot_without_its_click_handler_is_reported_taken(self):
+        """20:00 那格的 Step3Action 呼叫不見了 —— 被別人訂走了。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+
+    def test_another_court_at_the_same_hour_does_not_count(self):
+        """1196 的 20:00 還空著，但我們要的是 1199。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+
+    def test_a_page_that_never_mentions_our_court_is_unknown(self):
+        """預約窗口還沒開時列表頁可能根本不渲染那一天 —— 那是未知，不是已訂。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state("<html>查無資料</html>", hour=20) == SLOT_UNKNOWN
+
+    def test_tolerates_a_zero_padded_hour(self):
+        """中山的 QTime 補零、中正不補，解析不該依賴這個差異。"""
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        assert (
+            service.parse_slot_state(LIST_PAGE_HTML_PADDED_HOUR, hour=9)
+            == SLOT_AVAILABLE
+        )
+
+    def test_tolerates_whitespace_in_the_call(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        html = '<a onclick="Step3Action( 1199 , 20 )">'
+        assert service.parse_slot_state(html, hour=20) == SLOT_AVAILABLE
