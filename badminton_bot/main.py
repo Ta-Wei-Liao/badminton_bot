@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 
 import aiohttp
+from badminton_bot.utils.timing import sleep_then_spin
 from badminton_bot.services.sports_center_webservice import SportsCenterWebService
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
@@ -159,26 +160,26 @@ def set_logger(debug_mode: bool = False) -> None:
 
 
 def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
-    """Count down to the target_time (which is booking_date plus offset timedelta),
-    but always show the remaining seconds to the specified booking date.
+    """Count down to the target time (booking_date plus offset), while always
+    reporting the seconds remaining to booking_date itself.
 
     Args:
         booking_date (datetime): specified date to book the court
-        offset (timedelta, optional): _description_. Defaults to timedelta().
+        offset (timedelta, optional): shifts the wait target relative to
+            booking_date. Defaults to timedelta().
     """
-    current_time = datetime.now()
     count_down_target_time = booking_date + offset
-    while current_time < count_down_target_time:
-        if current_time.microsecond == 0:
-            delta_seconds = (booking_date - current_time).seconds
-            if delta_seconds >= 10 and delta_seconds % 5 == 0:
-                logging.info("倒數 %d 秒", delta_seconds)
-            elif delta_seconds < 10:
-                logging.info("倒數 %d 秒", delta_seconds)
-            else:
-                pass
 
-        current_time = datetime.now()
+    def _report(_remaining_to_target: float) -> None:
+        # 一律回報距離 booking_date 的秒數，而不是距離提前量之後的等待目標。
+        # 用 total_seconds()：timedelta.seconds 遇到負值會捲成 ~86400。
+        delta_seconds = int((booking_date - datetime.now()).total_seconds())
+        if delta_seconds < 10 or delta_seconds % 5 == 0:
+            logging.info("倒數 %d 秒", delta_seconds)
+
+    sleep_then_spin(
+        target_epoch=count_down_target_time.timestamp(), on_tick=_report
+    )
 
 
 def webservice_factory(court_no: int) -> SportsCenterWebService:
