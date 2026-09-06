@@ -111,13 +111,13 @@ def compute_send_time(
     """
     automatic_correction = theta - rtt_median / 2 + margin
     within_clamp = abs(automatic_correction) <= MAX_AUTO_CORRECTION_SECONDS
+    if not within_clamp:
+        automatic_correction = 0.0
 
-    if within_clamp:
-        send_at = nominal_epoch + theta - rtt_median / 2 + margin + manual_offset_ms / 1000.0
-    else:
-        send_at = nominal_epoch + manual_offset_ms / 1000.0
-
-    return send_at, within_clamp
+    return (
+        nominal_epoch + automatic_correction + manual_offset_ms / 1000,
+        within_clamp,
+    )
 
 
 def plan_send_time(

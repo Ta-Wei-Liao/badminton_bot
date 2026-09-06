@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from badminton_bot.utils.timing import (
     MAX_AUTO_CORRECTION_SECONDS,
     compute_send_time,
@@ -95,7 +97,7 @@ class TestComputeSendTime:
             manual_offset_ms=0,
         )
         assert ok is True
-        assert send_at == NOMINAL - RTT / 2
+        assert send_at == pytest.approx(NOMINAL - RTT / 2, abs=1e-6)
 
     def test_a_local_clock_running_fast_delays_the_send(self):
         """θ 為正代表本機比伺服器快，必須晚一點送才對得上伺服器的開放時刻。"""
@@ -163,7 +165,7 @@ class TestPlanSendTime:
             manual_offset_ms=0,
         )
         assert (source, ok) == ("server", True)
-        assert send_at == NOMINAL + 0.120 - RTT / 2 + 0.020
+        assert send_at == pytest.approx(NOMINAL + 0.120 - RTT / 2 + 0.020, abs=1e-6)
 
     def test_a_clamped_server_measurement_falls_back_to_ntp(self):
         """量測爆掉時退回 NTP，而不是讓整場歪掉。"""
