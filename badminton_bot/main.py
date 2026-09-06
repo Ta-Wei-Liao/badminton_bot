@@ -2,11 +2,11 @@
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 
 import aiohttp
-from badminton_bot.utils.timing import sleep_then_spin
-from badminton_bot.services.sports_center_webservice import SportsCenterWebService
+from badminton_bot.services.sports_center_webservice import BookingAttempt, SportsCenterWebService
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
 )
@@ -21,6 +21,9 @@ from badminton_bot.utils.input_helper import (
     transform_offset_milliseconds_param,
     transform_yes_no_input,
 )
+from badminton_bot.utils.ntp_client import query_clock_offset
+from badminton_bot.utils.server_clock import ClockMeasurement, measure_server_clock
+from badminton_bot.utils.timing import plan_send_time, sleep_then_spin
 
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
 UPCOMING_BOOKING_DATE = (
@@ -31,6 +34,116 @@ WEBSERVICE_MAPPING: dict[int, SportsCenterWebService] = {
     0: ZhongshanSportsCenterWebService,
     1: ZhongzhengSportsCenterWebService,
 }
+
+# 開搶前這麼久登入，太早登入有 session 過期的風險
+LOGIN_OFFSET = timedelta(minutes=-3)
+
+# 時鐘探測的截止時刻。探測從登入完成後就開始，填滿原本閒置的那段時間
+PROBE_DEADLINE_OFFSET = timedelta(seconds=-30)
+
+# 預熱時機。夠做完預熱，又短到 keep-alive 一定守得住
+WARM_UP_OFFSET = timedelta(seconds=-10)
+
+# 搶完之後隔多久回頭看一次最終狀態
+POST_CHECK_DELAY_SECONDS = 2.0
+
+
+async def run_booking_race(
+    service, session, booking_periods, send_at_epoch: float
+) -> list[BookingAttempt]:
+    """Arm every booking request, then release them all at the send instant.
+
+    Every URL is built and every task is scheduled before the deadline, so the
+    only work left at the opening instant is releasing the event.
+
+    Uses return_exceptions so one request failing cannot cancel the others —
+    losing the 21:00 slot because the 20:00 response was unparsable would be a
+    self-inflicted wound.
+
+    Args:
+        service: the sports centre web service.
+        session: the aiohttp session.
+        booking_periods: the datetimes to book.
+        send_at_epoch (float): when to release the requests.
+
+    Returns:
+        list[BookingAttempt]: one attempt per period, in the order given.
+    """
+    ready_event = asyncio.Event()
+
+    tasks = []
+    for booking_date in booking_periods:
+        booking_url = service._generate_booking_url(
+            year=booking_date.year,
+            month=booking_date.month,
+            day=booking_date.day,
+            hour=booking_date.hour,
+        )
+        logging.info("已備妥 %d 點的請求：%s", booking_date.hour, booking_url)
+        tasks.append(
+            asyncio.create_task(
+                service.booking_courts(
+                    session=session,
+                    booking_url=booking_url,
+                    hour=booking_date.hour,
+                    ready_event=ready_event,
+                )
+            )
+        )
+
+    # 讓每個 task 都真的跑到 await ready_event.wait() 為止，
+    # 否則「預先掛載」只是名義上的。
+    await asyncio.sleep(0)
+
+    sleep_then_spin(target_epoch=send_at_epoch)
+    ready_event.set()
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    attempts: list[BookingAttempt] = []
+    for booking_date, result in zip(booking_periods, results):
+        if isinstance(result, BaseException):
+            logging.error("%d 點的請求拋出未預期的例外：%s", booking_date.hour, result)
+            attempts.append(
+                BookingAttempt(
+                    hour=booking_date.hour,
+                    url="",
+                    sent_epoch=0.0,
+                    rtt=0.0,
+                    server_date=None,
+                    success=None,
+                    error=str(result),
+                )
+            )
+        else:
+            attempts.append(result)
+
+    return attempts
+
+
+def report_attempts(
+    attempts: list[BookingAttempt], nominal_epoch: float, source: str
+) -> None:
+    """Log everything needed to tune the next run, so nobody has to guess again.
+
+    Args:
+        attempts (list[BookingAttempt]): the outcomes of the race.
+        nominal_epoch (float): the nominal opening instant.
+        source (str): which clock offset was applied.
+    """
+    logging.info("=== 搶場地結果（時鐘來源：%s）===", source)
+    for attempt in attempts:
+        offset_ms = (attempt.sent_epoch - nominal_epoch) * 1000
+        logging.info(
+            "%d 點：%s｜送出時刻相對開放時刻 %+.1f 毫秒｜RTT %.1f 毫秒｜"
+            "伺服器 Date %s%s",
+            attempt.hour,
+            {True: "成功", False: "失敗", None: "無法判讀"}[attempt.success],
+            offset_ms,
+            attempt.rtt * 1000,
+            attempt.server_date or "（無）",
+            f"｜錯誤：{attempt.error}" if attempt.error else "",
+        )
 
 
 async def main():
@@ -117,30 +230,117 @@ async def main():
     else:
         logging.info("預約資訊已確認，繼續執行程式")
 
-    # 時間倒數至開始搶票前的指定時間，再開始登入動作，避免登入太久導致 session 過期
-    count_down(booking_date=upcoming_booking_date, offset=timedelta(minutes=-3))
+    # 非開發模式才校時。dev mode 打的仍是真實網站，每次測試都跑完整流程
+    # 等於在非開搶時段多送十幾個請求，違反 live-site constraint。
+    theta_ntp = None if dev_mode else query_clock_offset()
+
+    nominal_epoch = upcoming_booking_date.timestamp()
+    booking_target = booking_periods[0]
+
+    # 倒數至開搶前的登入時間，太早登入有 session 過期的風險
+    count_down(booking_date=upcoming_booking_date, offset=LOGIN_OFFSET)
 
     with webservice(username=national_id, password=password) as service:
-        if service.login_status:
-            cookies = service.get_cookies()
-            async with aiohttp.ClientSession(cookies=cookies) as session:
-                # 時間倒數至開始搶票的時間
-                count_down(booking_date=upcoming_booking_date)
-
-                # 非同步發送兩個請求
-                tasks = [
-                    service.booking_courts(
-                        session=session,
-                        year=booking_date.year,
-                        month=booking_date.month,
-                        day=booking_date.day,
-                        hour=booking_date.hour,
-                    )
-                    for booking_date in booking_periods
-                ]
-                await asyncio.gather(*tasks)
-        else:
+        if not service.login_status:
             logging.error("登入失敗！")
+            return
+
+        cookies = service.get_cookies()
+        referer = service._generate_list_page_url(
+            year=booking_target.year,
+            month=booking_target.month,
+            day=booking_target.day,
+        )
+
+        async with service.create_session(cookies=cookies, referer=referer) as session:
+            measurement = ClockMeasurement(theta=None, uncertainty=0.0)
+            if not dev_mode:
+                measurement = await measure_server_clock(
+                    session=session,
+                    url=referer,
+                    deadline_epoch=(
+                        upcoming_booking_date + PROBE_DEADLINE_OFFSET
+                    ).timestamp(),
+                )
+                logging.info(
+                    "伺服器校時：θ=%s 不確定度=±%.1f 毫秒 探測 %d 次 捨棄 %d 次",
+                    f"{measurement.theta * 1000:+.1f} 毫秒"
+                    if measurement.theta is not None
+                    else "量測失敗",
+                    measurement.uncertainty * 1000,
+                    measurement.probe_count,
+                    measurement.discarded_count,
+                )
+                if measurement.theta is not None and theta_ntp is not None:
+                    logging.info(
+                        "與 NTP 的差距 %.1f 毫秒（接近代表伺服器有做 NTP，可信度高）",
+                        (measurement.theta - theta_ntp) * 1000,
+                    )
+
+            # 倒數至預熱時機
+            count_down(booking_date=upcoming_booking_date, offset=WARM_UP_OFFSET)
+            warm_up_results = await service.warm_up(
+                session=session,
+                year=booking_target.year,
+                month=booking_target.month,
+                day=booking_target.day,
+            )
+
+            # 前提驗證：那格在開放前就已經不是可訂狀態的話，所有優化的收益是零。
+            # 只記錄，不對結果做任何分支。
+            if warm_up_results and warm_up_results[0].body:
+                for booking_date in booking_periods:
+                    logging.info(
+                        "開放前 %d 點的目標場地狀態：%s",
+                        booking_date.hour,
+                        service.parse_slot_state(
+                            warm_up_results[0].body, hour=booking_date.hour
+                        ),
+                    )
+
+            send_at_epoch, source, within_clamp = plan_send_time(
+                nominal_epoch=nominal_epoch,
+                theta_srv=measurement.theta,
+                uncertainty=measurement.uncertainty,
+                theta_ntp=theta_ntp,
+                rtt_median=measurement.rtt_median,
+                manual_offset_ms=0,
+            )
+            if not within_clamp:
+                logging.warning(
+                    "量到的時鐘修正量超出 ±%.1f 秒的上限，已拒絕套用",
+                    2.0,
+                )
+            logging.info(
+                "送出時刻相對名目開放時刻 %+.1f 毫秒（來源：%s）",
+                (send_at_epoch - nominal_epoch) * 1000,
+                source,
+            )
+
+            attempts = await run_booking_race(
+                service=service,
+                session=session,
+                booking_periods=booking_periods,
+                send_at_epoch=send_at_epoch,
+            )
+            report_attempts(
+                attempts=attempts, nominal_epoch=nominal_epoch, source=source
+            )
+
+            # 事後偵察：這是「輸幾毫秒」與「根本沒開放給你」之間唯一的判別依據
+            if not dev_mode:
+                await asyncio.sleep(POST_CHECK_DELAY_SECONDS)
+                try:
+                    async with session.get(referer) as response:
+                        body = await response.text()
+                    for booking_date in booking_periods:
+                        logging.info(
+                            "開放後 %d 點的目標場地狀態：%s",
+                            booking_date.hour,
+                            service.parse_slot_state(body, hour=booking_date.hour),
+                        )
+                except Exception as error:
+                    logging.warning("事後偵察失敗：%s", error)
 
 
 def set_logger(debug_mode: bool = False) -> None:
