@@ -5,7 +5,6 @@ import logging
 import time
 from datetime import datetime, timedelta
 
-import aiohttp
 from badminton_bot.services.sports_center_webservice import BookingAttempt, SportsCenterWebService
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
@@ -46,6 +45,49 @@ WARM_UP_OFFSET = timedelta(seconds=-10)
 
 # 搶完之後隔多久回頭看一次最終狀態
 POST_CHECK_DELAY_SECONDS = 2.0
+
+# 預熱的時間預算。預熱本身約 200 毫秒，而它整個位在 T-10 秒的窗口裡，
+# 留 6 秒已經很寬鬆，超過就代表出事了，寧可冷連線也不要拖掉開搶。
+WARM_UP_BUDGET_SECONDS = 6.0
+
+# 最後這麼久才進 busy-wait。忙碌等待期間 event loop 完全停擺，
+# 伺服器送來的 FIN 不會被處理，死掉的連線就會留在連線池裡等著被用。
+FINAL_SPIN_SECONDS = 0.3
+
+
+async def run_with_deadline(awaitable, budget_seconds: float, label: str, fallback):
+    """Await something with a hard ceiling, degrading to fallback instead of aborting.
+
+    A stalled request raises nothing, so try/except alone cannot protect the
+    schedule — only a timeout can.
+
+    Args:
+        awaitable: the coroutine to run.
+        budget_seconds (float): hard ceiling. A non-positive budget skips the work.
+        label (str): name used in the warning log.
+        fallback: value returned when the work times out, fails, or is skipped.
+
+    Returns:
+        The awaitable's result, or fallback.
+    """
+    if budget_seconds <= 0:
+        logging.warning("%s 的時間預算已用盡，直接跳過", label)
+        # 收下的 coroutine 沒被 await 就得自己關掉，否則會留下 never awaited 警告。
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+
+        return fallback
+
+    try:
+        return await asyncio.wait_for(awaitable, timeout=budget_seconds)
+    except asyncio.TimeoutError:
+        logging.warning("%s 超過 %.1f 秒預算，已放棄，繼續搶場地", label, budget_seconds)
+    except Exception as error:
+        # CancelledError 繼承自 BaseException，不會被這裡吞掉，仍會往外傳。
+        logging.warning("%s 失敗：%s，已放棄，繼續搶場地", label, error)
+
+    return fallback
 
 
 async def run_booking_race(
@@ -95,7 +137,29 @@ async def run_booking_race(
     # 否則「預先掛載」只是名義上的。
     await asyncio.sleep(0)
 
-    sleep_then_spin(target_epoch=send_at_epoch)
+    last_reported: int | None = None
+
+    def _report_countdown(remaining: float) -> None:
+        nonlocal last_reported
+        whole_seconds = int(remaining)
+        if whole_seconds == last_reported:
+            return
+
+        last_reported = whole_seconds
+        logging.info("倒數 %d 秒", whole_seconds)
+
+    # 讓出控制權直到最後一刻，event loop 才有機會處理伺服器送來的 FIN，
+    # 把已經死掉的連線踢出連線池；忙碌等待只保留在最後 0.3 秒。
+    coarse_until = send_at_epoch - FINAL_SPIN_SECONDS
+    while (remaining := coarse_until - time.time()) > 0:
+        _report_countdown(send_at_epoch - time.time())
+        await asyncio.sleep(min(0.05, remaining))
+
+    sleep_then_spin(
+        target_epoch=send_at_epoch,
+        spin_window=FINAL_SPIN_SECONDS,
+        on_tick=_report_countdown,
+    )
     ready_event.set()
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -122,24 +186,31 @@ async def run_booking_race(
 
 
 def report_attempts(
-    attempts: list[BookingAttempt], nominal_epoch: float, source: str
+    attempts: list[BookingAttempt], reference_epoch: float, source: str
 ) -> None:
     """Log everything needed to tune the next run, so nobody has to guess again.
 
     Args:
         attempts (list[BookingAttempt]): the outcomes of the race.
-        nominal_epoch (float): the nominal opening instant.
+        reference_epoch (float): the nominal opening instant to measure the
+            send times against — deliberately the un-nudged one, so a user who
+            asked for +200 ms sees +200 ms rather than zero.
         source (str): which clock offset was applied.
     """
     logging.info("=== 搶場地結果（時鐘來源：%s）===", source)
     for attempt in attempts:
-        offset_ms = (attempt.sent_epoch - nominal_epoch) * 1000
+        # 例外造出來的合成紀錄沒有送出時刻，拿 0.0 去減會印出 -1.8e12 毫秒。
+        offset_text = (
+            "（無送出紀錄）"
+            if attempt.sent_epoch == 0.0
+            else f"{(attempt.sent_epoch - reference_epoch) * 1000:+.1f} 毫秒"
+        )
         logging.info(
-            "%d 點：%s｜送出時刻相對開放時刻 %+.1f 毫秒｜RTT %.1f 毫秒｜"
+            "%d 點：%s｜送出時刻相對名目開放時刻 %s｜RTT %.1f 毫秒｜"
             "伺服器 Date %s%s",
             attempt.hour,
             {True: "成功", False: "失敗", None: "無法判讀"}[attempt.success],
-            offset_ms,
+            offset_text,
             attempt.rtt * 1000,
             attempt.server_date or "（無）",
             f"｜錯誤：{attempt.error}" if attempt.error else "",
@@ -234,7 +305,13 @@ async def main():
     # 等於在非開搶時段多送十幾個請求，違反 live-site constraint。
     theta_ntp = None if dev_mode else query_clock_offset()
 
+    # 送出時刻的計算基準，非開發模式下已經含使用者的手動毫秒偏移
+    # （所以 plan_send_time 的 manual_offset_ms 才傳 0，不能重複套用）。
     nominal_epoch = upcoming_booking_date.timestamp()
+
+    # 儀表的基準則要用「沒被手動偏移動過」的名目開放時刻，
+    # 否則輸入 +200 的人會看到 +0.0 毫秒，等於量不到自己調了什麼。
+    reference_epoch = nominal_epoch if dev_mode else UPCOMING_BOOKING_DATE.timestamp()
     booking_target = booking_periods[0]
 
     # 倒數至開搶前的登入時間，太早登入有 session 過期的風險
@@ -255,12 +332,18 @@ async def main():
         async with service.create_session(cookies=cookies, referer=referer) as session:
             measurement = ClockMeasurement(theta=None, uncertainty=0.0)
             if not dev_mode:
-                measurement = await measure_server_clock(
-                    session=session,
-                    url=referer,
-                    deadline_epoch=(
-                        upcoming_booking_date + PROBE_DEADLINE_OFFSET
-                    ).timestamp(),
+                probe_deadline_epoch = (
+                    upcoming_booking_date + PROBE_DEADLINE_OFFSET
+                ).timestamp()
+                measurement = await run_with_deadline(
+                    measure_server_clock(
+                        session=session,
+                        url=referer,
+                        deadline_epoch=probe_deadline_epoch,
+                    ),
+                    budget_seconds=probe_deadline_epoch - time.time(),
+                    label="伺服器時鐘探測",
+                    fallback=ClockMeasurement(theta=None, uncertainty=0.0),
                 )
                 logging.info(
                     "伺服器校時：θ=%s 不確定度=±%.1f 毫秒 探測 %d 次 捨棄 %d 次",
@@ -271,6 +354,13 @@ async def main():
                     measurement.probe_count,
                     measurement.discarded_count,
                 )
+                if measurement.rtt_samples:
+                    logging.info(
+                        "探測 RTT：min %.1f／median %.1f／max %.1f 毫秒",
+                        min(measurement.rtt_samples) * 1000,
+                        measurement.rtt_median * 1000,
+                        max(measurement.rtt_samples) * 1000,
+                    )
                 if measurement.theta is not None and theta_ntp is not None:
                     logging.info(
                         "與 NTP 的差距 %.1f 毫秒（接近代表伺服器有做 NTP，可信度高）",
@@ -279,11 +369,16 @@ async def main():
 
             # 倒數至預熱時機
             count_down(booking_date=upcoming_booking_date, offset=WARM_UP_OFFSET)
-            warm_up_results = await service.warm_up(
-                session=session,
-                year=booking_target.year,
-                month=booking_target.month,
-                day=booking_target.day,
+            warm_up_results = await run_with_deadline(
+                service.warm_up(
+                    session=session,
+                    year=booking_target.year,
+                    month=booking_target.month,
+                    day=booking_target.day,
+                ),
+                budget_seconds=WARM_UP_BUDGET_SECONDS,
+                label="連線預熱",
+                fallback=[],
             )
 
             # 前提驗證：那格在開放前就已經不是可訂狀態的話，所有優化的收益是零。
@@ -313,7 +408,7 @@ async def main():
                 )
             logging.info(
                 "送出時刻相對名目開放時刻 %+.1f 毫秒（來源：%s）",
-                (send_at_epoch - nominal_epoch) * 1000,
+                (send_at_epoch - reference_epoch) * 1000,
                 source,
             )
 
@@ -324,7 +419,7 @@ async def main():
                 send_at_epoch=send_at_epoch,
             )
             report_attempts(
-                attempts=attempts, nominal_epoch=nominal_epoch, source=source
+                attempts=attempts, reference_epoch=reference_epoch, source=source
             )
 
             # 事後偵察：這是「輸幾毫秒」與「根本沒開放給你」之間唯一的判別依據
@@ -374,7 +469,19 @@ def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
         # 一律回報距離 booking_date 的秒數，而不是距離提前量之後的等待目標。
         # 用 total_seconds()：timedelta.seconds 遇到負值會捲成 ~86400。
         delta_seconds = int((booking_date - datetime.now()).total_seconds())
-        if delta_seconds < 10 or delta_seconds % 5 == 0:
+
+        # booking_date 最遠可能在七天之後，一路每 5 秒印一次會累積十幾萬行 log，
+        # 真正要看的最後幾秒反而被沖掉。離得越遠，回報越稀疏。
+        if delta_seconds > 3600:
+            cadence = 600
+        elif delta_seconds > 300:
+            cadence = 60
+        elif delta_seconds >= 10:
+            cadence = 5
+        else:
+            cadence = 1
+
+        if delta_seconds % cadence == 0:
             logging.info("倒數 %d 秒", delta_seconds)
 
     sleep_then_spin(

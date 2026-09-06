@@ -9,6 +9,7 @@ This only ever talks to a national time server. It never touches the booking sit
 import logging
 import socket
 import struct
+import time
 
 NTP_SERVER = "time.stdtime.gov.tw"
 NTP_PORT = 123
@@ -76,8 +77,6 @@ def pick_best_sample(samples: list[tuple[float, float]]) -> float | None:
 
 def _collect_one_sample(server: str, timeout: float) -> tuple[float, float]:
     """Exchange one request/reply with the NTP server. Raises on any failure."""
-    import time
-
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
         client.settimeout(timeout)
         t1 = time.time()

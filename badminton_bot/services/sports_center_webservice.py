@@ -33,6 +33,17 @@ DNS_CACHE_SECONDS = 300
 # 握手成本汙染，無法代表開搶時那條熱連線，連帶讓 RTT/2 的補償失準。
 KEEPALIVE_TIMEOUT_SECONDS = 60
 
+# 開搶之前的每一個請求（時鐘探測、預熱）都卡在關鍵路徑上，而 aiohttp 預設是
+# total=300 秒。請求「卡住」不會拋出任何例外，try/except 攔不到，只有 timeout 攔得到；
+# 一發卡住的探測就足以吃掉整段倒數，讓預熱與搶場地根本輪不到。
+SESSION_TIMEOUT_SECONDS = 5.0
+CONNECT_TIMEOUT_SECONDS = 3.0
+
+# 搶場地的請求是在截止時刻之後才送出的，後面沒有任何排程在等它。
+# 丟掉「到底有沒有搶到」的紀錄比多等一會兒更糟 —— 儀表是使用者唯一的回饋，
+# 所以這一發單獨放寬上限。
+BOOKING_TIMEOUT_SECONDS = 30.0
+
 
 @dataclass
 class WarmUpResult:
@@ -314,6 +325,10 @@ class SportsCenterWebService(ABC):
             cookies (dict[str, str]): the authenticated cookies from Selenium.
             referer (str): the page the booking requests would be clicked from.
 
+        The session-wide timeout guards the pre-deadline path: a request that
+        stalls raises nothing, so only a deadline can stop it eating the
+        countdown. The booking request overrides it with a longer one of its own.
+
         Returns:
             aiohttp.ClientSession: a session with pooled, browser-looking requests.
         """
@@ -328,6 +343,9 @@ class SportsCenterWebService(ABC):
             connector=connector,
             cookies=cookies,
             headers=build_browser_headers(referer=referer),
+            timeout=aiohttp.ClientTimeout(
+                total=SESSION_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
+            ),
         )
 
     async def warm_up(
@@ -411,7 +429,9 @@ class SportsCenterWebService(ABC):
         started = time.perf_counter()
 
         try:
-            async with session.get(booking_url) as response:
+            async with session.get(
+                booking_url, timeout=aiohttp.ClientTimeout(total=BOOKING_TIMEOUT_SECONDS)
+            ) as response:
                 text = await response.text()
                 rtt = time.perf_counter() - started
                 server_date = response.headers.get("Date")

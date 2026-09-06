@@ -14,6 +14,8 @@ from selenium.common.exceptions import NoAlertPresentException, NoSuchElementExc
 
 from badminton_bot.services.sports_center_webservice import (
     BROWSER_USER_AGENT,
+    CONNECT_TIMEOUT_SECONDS,
+    SESSION_TIMEOUT_SECONDS,
     SLOT_AVAILABLE,
     SLOT_TAKEN,
     SLOT_UNKNOWN,
@@ -446,6 +448,26 @@ class TestChromeOptions:
         arguments = service.get_default_chrome_options().arguments
         headers = build_browser_headers(referer="https://example.invalid/list")
         assert any(headers["User-Agent"] in argument for argument in arguments)
+
+
+class TestCreateSession:
+    """開搶前的每一發請求都在關鍵路徑上，卡住不會拋例外，只有 timeout 攔得到。"""
+
+    def test_every_request_is_bounded_by_default(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+
+        async def scenario():
+            # 只是建立物件，不會連線；連線是 session.get 才發生的事。
+            session = service.create_session(
+                cookies={}, referer="https://example.invalid/list"
+            )
+            try:
+                assert session.timeout.total == SESSION_TIMEOUT_SECONDS
+                assert session.timeout.connect == CONNECT_TIMEOUT_SECONDS
+            finally:
+                await session.close()
+
+        asyncio.run(scenario())
 
 
 class FakeBookingResponse:

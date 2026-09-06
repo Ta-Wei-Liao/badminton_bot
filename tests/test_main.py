@@ -1,12 +1,20 @@
 """Tests for the orchestration helpers in main. No network, no browser."""
 
 import asyncio
+import inspect
+import logging
 import time
 from datetime import datetime, timedelta
 
 import pytest
 
-from badminton_bot.main import WEBSERVICE_MAPPING, count_down, webservice_factory, run_booking_race
+from badminton_bot.main import (
+    WEBSERVICE_MAPPING,
+    count_down,
+    run_booking_race,
+    run_with_deadline,
+    webservice_factory,
+)
 from badminton_bot.services.sports_center_webservice import BookingAttempt
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
@@ -149,3 +157,74 @@ class TestRunBookingRace:
         )
         assert [attempt.hour for attempt in attempts] == [20, 21]
         assert all(isinstance(attempt, BookingAttempt) for attempt in attempts)
+
+
+class TestRunWithDeadline:
+    """卡住的請求不會拋任何例外，try/except 攔不到，只有時間預算攔得到。"""
+
+    def test_returns_the_real_result_when_the_work_finishes_in_time(self):
+        async def work():
+            return "完成"
+
+        assert (
+            asyncio.run(
+                run_with_deadline(
+                    work(), budget_seconds=1.0, label="測試", fallback="退回值"
+                )
+            )
+            == "完成"
+        )
+
+    def test_falls_back_and_warns_when_the_work_hangs(self, caplog):
+        async def hangs_forever():
+            # 永遠不會被 set 的 event，模擬一個連上之後就不回應的請求。
+            await asyncio.Event().wait()
+
+        with caplog.at_level(logging.WARNING):
+            result = asyncio.run(
+                run_with_deadline(
+                    hangs_forever(),
+                    budget_seconds=0.05,
+                    label="會卡住的階段",
+                    fallback="退回值",
+                )
+            )
+
+        assert result == "退回值"
+        assert "會卡住的階段" in caplog.text
+
+    def test_falls_back_when_the_work_raises(self, caplog):
+        async def explodes():
+            raise OSError("模擬連線中斷")
+
+        with caplog.at_level(logging.WARNING):
+            result = asyncio.run(
+                run_with_deadline(
+                    explodes(), budget_seconds=1.0, label="會炸掉的階段", fallback=[]
+                )
+            )
+
+        assert result == []
+        assert "會炸掉的階段" in caplog.text
+
+    def test_a_non_positive_budget_skips_the_work_entirely(self, caplog):
+        started = False
+
+        async def work():
+            nonlocal started
+            started = True
+            return "完成"
+
+        coroutine = work()
+        with caplog.at_level(logging.WARNING):
+            result = asyncio.run(
+                run_with_deadline(
+                    coroutine, budget_seconds=0.0, label="來不及的階段", fallback=None
+                )
+            )
+
+        assert result is None
+        assert started is False
+        # 沒 await 就得自己關掉，否則會留下 coroutine was never awaited 警告。
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+        assert "來不及的階段" in caplog.text
