@@ -19,6 +19,39 @@ SLOT_AVAILABLE = "可訂"
 SLOT_TAKEN = "已訂"
 SLOT_UNKNOWN = "未知"
 
+# Selenium 與 aiohttp 共用同一個 UA，否則登入與搶場地會用不同身分出現在對方的 log 裡。
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+)
+
+
+def build_browser_headers(referer: str) -> dict[str, str]:
+    """Assemble the headers an ordinary browser would send on this navigation.
+
+    aiohttp's default User-Agent announces itself as a Python script. Note the
+    trade-off: the TLS fingerprint and header order still say Python, so on a
+    site with fingerprinting this is a claim that can be caught out. On a local
+    sports centre's ASP.NET system that is very unlikely, and looking ordinary
+    in the access log is worth more.
+
+    Args:
+        referer (str): the page this request would have been clicked from.
+
+    Returns:
+        dict[str, str]: headers for the aiohttp session.
+    """
+    return {
+        "User-Agent": BROWSER_USER_AGENT,
+        "Referer": referer,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+    }
+
 
 class SportsCenterWebService(ABC):
     sport_center_name: str
@@ -67,10 +100,9 @@ class SportsCenterWebService(ABC):
         # run chrome browser without UI
         options.add_argument("--headless")
 
-        # 模擬真實瀏覽器
-        options.add_argument(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
-        )
+        # 模擬真實瀏覽器。必須用 --user-agent= 這個旗標，
+        # 直接丟裸字串進去 Chrome 不會當成 UA 設定。
+        options.add_argument(f"--user-agent={BROWSER_USER_AGENT}")
 
         return options
 

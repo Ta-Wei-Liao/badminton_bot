@@ -12,10 +12,12 @@ import pytest
 from selenium.common.exceptions import NoAlertPresentException, NoSuchElementException
 
 from badminton_bot.services.sports_center_webservice import (
+    BROWSER_USER_AGENT,
     SLOT_AVAILABLE,
     SLOT_TAKEN,
     SLOT_UNKNOWN,
     SportsCenterWebService,
+    build_browser_headers,
 )
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
@@ -406,3 +408,38 @@ class TestParseSlotState:
         service = build_without_browser(ZhongshanSportsCenterWebService)
         html = '<a onclick="Step3Action(84, 19)"><img src="img/place01.png"></a>'
         assert service.parse_slot_state(html, hour=20) == SLOT_TAKEN
+
+
+class TestBrowserHeaders:
+    def test_the_user_agent_is_not_the_aiohttp_default(self):
+        """預設的 Python/aiohttp UA 等於在 log 裡自報身分。"""
+        assert "aiohttp" not in BROWSER_USER_AGENT
+        assert "Python" not in BROWSER_USER_AGENT
+        assert BROWSER_USER_AGENT.startswith("Mozilla/5.0")
+
+    def test_headers_carry_the_referer_they_were_given(self):
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert headers["Referer"] == "https://example.invalid/list"
+
+    def test_headers_ask_for_traditional_chinese(self):
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert headers["Accept-Language"].startswith("zh-TW")
+
+    def test_headers_use_the_shared_user_agent(self):
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert headers["User-Agent"] == BROWSER_USER_AGENT
+
+
+class TestChromeOptions:
+    def test_the_user_agent_argument_uses_the_flag_chrome_understands(self):
+        """原本直接把 UA 字串當參數丟進去，Chrome 根本不會理它。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        arguments = service.get_default_chrome_options().arguments
+        assert f"--user-agent={BROWSER_USER_AGENT}" in arguments
+
+    def test_selenium_and_aiohttp_cannot_drift_apart(self):
+        """兩邊共用同一個常數，否則登入與搶場地會用不同身分。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        arguments = service.get_default_chrome_options().arguments
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert any(headers["User-Agent"] in argument for argument in arguments)
