@@ -271,6 +271,95 @@ class TestMeasureServerClock:
         )
         assert measurement.theta is None
 
+    def test_contradictory_evidence_yields_no_measurement(self):
+        """Date 在探測之間大幅跳動、方向不定，足以連續撞出兩次矛盾證據。
+
+        注意：Date 完全「凍結」不動反而不會矛盾 —— 隨著真實時間前進，
+        每次探測的區間會一起緩慢右移，排程也跟著往同個方向調整，
+        兩者互相追蹤，看起來就像收斂到一個穩定值。要撞出矛盾，
+        需要的是不可預期、方向不定的跳動，而不是單調漂移。
+        """
+
+        class ContradictorySession:
+            def __init__(self, thetas):
+                self.thetas = iter(thetas)
+                self.requested_urls: list[str] = []
+
+            def get(self, url, **kwargs):
+                import time
+
+                self.requested_urls.append(url)
+                theta = next(self.thetas)
+                server_now = time.time() - theta
+                return FakeResponse(
+                    {"Date": formatdate(timeval=server_now, usegmt=True)}
+                )
+
+        session = ContradictorySession(
+            [0.0, 10.0, -10.0, 10.0, -10.0, 10.0, -10.0, 10.0]
+        )
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=8,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        assert measurement.discarded_count == 0
+        # 矛盾達到上限就立刻退場，遠不用打完整個 budget
+        assert measurement.probe_count < 8
+        assert len(measurement.rtt_samples) == measurement.probe_count
+
+    def test_non_convergence_within_budget_yields_no_measurement(self):
+        """budget 用完時，區間仍然沒有窄到 MAX_USEFUL_UNCERTAINTY_SECONDS 之內。"""
+        session = FakeSession(theta_true=0.0)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=2,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        # 有可用樣本才證明這是「沒收斂」，而不是「完全沒有可用樣本」
+        assert len(measurement.rtt_samples) > 0
+
+    def test_an_unparsable_date_is_discarded_not_trusted(self):
+        """Date header 存在、沒有 Age、沒有 X-Cache，純粹是格式壞掉。"""
+
+        class UnparsableDateSession:
+            def __init__(self):
+                self.requested_urls: list[str] = []
+
+            def get(self, url, **kwargs):
+                self.requested_urls.append(url)
+                return FakeResponse({"Date": "not a date at all"})
+
+        session = UnparsableDateSession()
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=3,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        assert measurement.discarded_count == measurement.probe_count == 3
+        assert len(session.requested_urls) == 3
+
 
 class TestClockMeasurement:
     def test_rtt_median_of_no_samples_is_zero(self):
