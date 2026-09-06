@@ -10,6 +10,7 @@ class ZhongshanSportsCenterWebService(SportsCenterWebService):
     sport_center_name = "中山運動中心"
     login_page_url = "https://scr.cyc.org.tw/tp01.aspx?module=login_page&files=login"
     booking_window_days = 14
+    target_qpid = 84
 
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
@@ -41,9 +42,23 @@ class ZhongshanSportsCenterWebService(SportsCenterWebService):
         else:
             return False
 
+    def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
+        # StepFlag=2 是唯讀列表頁，StepFlag=25 才是真的送出預約。
+        # 注意：這個網址是依中正（同平台）的格式推論出來的，尚未在中山實地驗證。
+        return (
+            f"https://scr.cyc.org.tw/tp01.aspx?module=net_booking"
+            f"&files=booking_place&StepFlag=2&PT=1"
+            f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        )
+
     def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
-        # 產生搶場地 url
-        return f"https://scr.cyc.org.tw/tp01.aspx?module=net_booking&files=booking_place&StepFlag=25&QPid=84&QTime={str(hour).zfill(2)}&PT=1&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        # 產生搶場地 url。中山的 QTime 要補零
+        return (
+            f"https://scr.cyc.org.tw/tp01.aspx?module=net_booking"
+            f"&files=booking_place&StepFlag=25&QPid={type(self).target_qpid}"
+            f"&QTime={str(hour).zfill(2)}&PT=1"
+            f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
+        )
 
     def _is_booking_success(self, text: str) -> bool:
         if "PT=1&X=2" in text:

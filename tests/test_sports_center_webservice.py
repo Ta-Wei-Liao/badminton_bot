@@ -6,12 +6,24 @@ suite from touching the live booking sites. Only the pure parts (URL building,
 response parsing, subclass contract) are exercised.
 """
 
+import asyncio
 from unittest.mock import Mock
 
 import pytest
 from selenium.common.exceptions import NoAlertPresentException, NoSuchElementException
 
-from badminton_bot.services.sports_center_webservice import SportsCenterWebService
+from badminton_bot.services.sports_center_webservice import (
+    BROWSER_USER_AGENT,
+    CONNECT_TIMEOUT_SECONDS,
+    SESSION_TIMEOUT_SECONDS,
+    SLOT_AVAILABLE,
+    SLOT_TAKEN,
+    SLOT_UNKNOWN,
+    BookingAttempt,
+    SportsCenterWebService,
+    WarmUpResult,
+    build_browser_headers,
+)
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
 )
@@ -30,7 +42,12 @@ def build_without_browser(service_cls: type[SportsCenterWebService]):
 class TestSubclassContract:
     @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
     def test_shipped_services_declare_every_required_attribute(self, service_cls):
-        for attr in ("sport_center_name", "login_page_url", "booking_window_days"):
+        for attr in (
+            "sport_center_name",
+            "login_page_url",
+            "booking_window_days",
+            "target_qpid",
+        ):
             assert attr in service_cls.__dict__
 
     def test_subclass_missing_a_required_attribute_fails_at_definition_time(self):
@@ -262,3 +279,374 @@ class TestLoginWaitsForDelayedElements:
 
         assert service.login_status is True
         assert "DoSubmit()" in service._driver.executed_scripts
+
+
+class TestTargetQpidContract:
+    def test_both_centres_declare_their_target_court(self):
+        assert ZhongzhengSportsCenterWebService.target_qpid == 1199
+        assert ZhongshanSportsCenterWebService.target_qpid == 84
+
+    def test_a_subclass_without_target_qpid_is_rejected_at_import_time(self):
+        """__init_subclass__ 在類別定義時就擋下來，而不是等到執行期才炸。"""
+        with pytest.raises(TypeError, match="target_qpid"):
+
+            class Incomplete(SportsCenterWebService):
+                sport_center_name = "測試中心"
+                login_page_url = "https://example.invalid/login"
+                booking_window_days = 7
+
+    def test_the_booking_url_is_built_from_the_class_attribute(self):
+        """換場地應該只要改 target_qpid 一行。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        url = service._generate_booking_url(year=2026, month=9, day=17, hour=20)
+        assert f"QPid={ZhongzhengSportsCenterWebService.target_qpid}" in url
+
+
+class TestListPageUrl:
+    def test_zhongzheng_list_page_is_the_read_only_step_flag(self):
+        """StepFlag=2 是列表頁，StepFlag=25 才會真的送出預約 —— 探測絕不能碰後者。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        url = service._generate_list_page_url(year=2026, month=9, day=17)
+        assert url == (
+            "https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking"
+            "&files=booking_place&StepFlag=2&PT=1&D=2026/09/17"
+        )
+        assert "StepFlag=25" not in url
+
+    def test_zhongshan_list_page_is_the_read_only_step_flag(self):
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        url = service._generate_list_page_url(year=2026, month=9, day=17)
+        assert url == (
+            "https://scr.cyc.org.tw/tp01.aspx?module=net_booking"
+            "&files=booking_place&StepFlag=2&PT=1&D=2026/09/17"
+        )
+        assert "StepFlag=25" not in url
+
+    def test_the_date_is_zero_padded(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        url = service._generate_list_page_url(year=2026, month=1, day=5)
+        assert "D=2026/01/05" in url
+
+
+class TestWarmUpUrls:
+    def test_warms_two_different_pages(self):
+        """兩條熱連線供兩個預約請求各用一條；兩個不同頁面併發載入是一般瀏覽行為。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        urls = service._generate_warm_up_urls(year=2026, month=9, day=17)
+        assert len(urls) == 2
+        assert len(set(urls)) == 2
+
+    def test_warm_up_never_touches_the_booking_action(self):
+        for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
+            service = build_without_browser(cls)
+            for url in service._generate_warm_up_urls(year=2026, month=9, day=17):
+                assert "StepFlag=25" not in url
+
+    def test_includes_the_list_page_and_the_login_page(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        urls = service._generate_warm_up_urls(year=2026, month=9, day=17)
+        assert service._generate_list_page_url(2026, 9, 17) in urls
+        assert ZhongzhengSportsCenterWebService.login_page_url in urls
+
+
+# 合成的 fixture，依照既有筆記寫成：可預約的格子帶 Step3Action 呼叫，
+# 已被預約的格子只有 place02 圖與 title。尚未與真實網頁核對過。
+LIST_PAGE_HTML = """
+<table>
+  <tr>
+    <td><a onclick="Step3Action(1199, 19)"><img src="img/place01.png"></a></td>
+    <td><img src="img/place02.png" title="已被預約"></td>
+    <td><a onclick="Step3Action(1199, 21)"><img src="img/place01.png"></a></td>
+    <td><a onclick="Step3Action(1196, 20)"><img src="img/place01.png"></a></td>
+  </tr>
+</table>
+"""
+
+LIST_PAGE_HTML_PADDED_HOUR = """
+<td><a onclick="Step3Action(84, 09)"><img src="img/place01.png"></a></td>
+"""
+
+
+class TestParseSlotState:
+    def test_an_open_slot_is_reported_available(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=19) == SLOT_AVAILABLE
+
+    def test_a_slot_without_its_click_handler_is_reported_taken(self):
+        """20:00 那格的 Step3Action 呼叫不見了 —— 被別人訂走了。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+
+    def test_another_court_at_the_same_hour_does_not_count(self):
+        """1196 的 20:00 還空著，但我們要的是 1199。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+
+    def test_a_page_that_never_mentions_our_court_is_unknown(self):
+        """預約窗口還沒開時列表頁可能根本不渲染那一天 —— 那是未知，不是已訂。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_slot_state("<html>查無資料</html>", hour=20) == SLOT_UNKNOWN
+
+    def test_tolerates_a_zero_padded_hour(self):
+        """中山的 QTime 補零、中正不補，解析不該依賴這個差異。"""
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        assert (
+            service.parse_slot_state(LIST_PAGE_HTML_PADDED_HOUR, hour=9)
+            == SLOT_AVAILABLE
+        )
+
+    def test_tolerates_whitespace_in_the_call(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        html = '<a onclick="Step3Action( 1199 , 20 )">'
+        assert service.parse_slot_state(html, hour=20) == SLOT_AVAILABLE
+
+    def test_incidental_substring_in_unrelated_content_does_not_trigger_taken(self):
+        """中山的 QPid=84 太短，很容易在圖檔名裡撞到（place0841.png）。
+        那不代表我們的場地被預約了 —— 只是巧合的字串。不該謊報成已訂。"""
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        html = '<img src="img/place0841.png">'
+        assert service.parse_slot_state(html, hour=20) == SLOT_UNKNOWN
+
+    def test_our_court_at_another_hour_reads_as_taken(self):
+        """我們的場地確實出現在頁面上（Step3Action 呼叫），只是不在我們查詢的時段。
+        那表示那個時段已經被訂走了。"""
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        html = '<a onclick="Step3Action(84, 19)"><img src="img/place01.png"></a>'
+        assert service.parse_slot_state(html, hour=20) == SLOT_TAKEN
+
+
+class TestBrowserHeaders:
+    def test_the_user_agent_is_not_the_aiohttp_default(self):
+        """預設的 Python/aiohttp UA 等於在 log 裡自報身分。"""
+        assert "aiohttp" not in BROWSER_USER_AGENT
+        assert "Python" not in BROWSER_USER_AGENT
+        assert BROWSER_USER_AGENT.startswith("Mozilla/5.0")
+
+    def test_headers_carry_the_referer_they_were_given(self):
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert headers["Referer"] == "https://example.invalid/list"
+
+    def test_headers_ask_for_traditional_chinese(self):
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert headers["Accept-Language"].startswith("zh-TW")
+
+    def test_headers_use_the_shared_user_agent(self):
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert headers["User-Agent"] == BROWSER_USER_AGENT
+
+
+class TestChromeOptions:
+    def test_the_user_agent_argument_uses_the_flag_chrome_understands(self):
+        """原本直接把 UA 字串當參數丟進去，Chrome 根本不會理它。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        arguments = service.get_default_chrome_options().arguments
+        assert f"--user-agent={BROWSER_USER_AGENT}" in arguments
+
+    def test_selenium_and_aiohttp_cannot_drift_apart(self):
+        """兩邊共用同一個常數，否則登入與搶場地會用不同身分。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        arguments = service.get_default_chrome_options().arguments
+        headers = build_browser_headers(referer="https://example.invalid/list")
+        assert any(headers["User-Agent"] in argument for argument in arguments)
+
+
+class TestCreateSession:
+    """開搶前的每一發請求都在關鍵路徑上，卡住不會拋例外，只有 timeout 攔得到。"""
+
+    def test_every_request_is_bounded_by_default(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+
+        async def scenario():
+            # 只是建立物件，不會連線；連線是 session.get 才發生的事。
+            session = service.create_session(
+                cookies={}, referer="https://example.invalid/list"
+            )
+            try:
+                assert session.timeout.total == SESSION_TIMEOUT_SECONDS
+                assert session.timeout.connect == CONNECT_TIMEOUT_SECONDS
+            finally:
+                await session.close()
+
+        asyncio.run(scenario())
+
+
+class FakeBookingResponse:
+    def __init__(self, body: str, headers: dict[str, str] | None = None):
+        self.body = body
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def text(self):
+        return self.body
+
+
+class RecordingSession:
+    def __init__(self, body: str = "PT=1&X=1", headers=None):
+        self.body = body
+        self.headers = headers or {}
+        self.requested_urls: list[str] = []
+        self.request_epochs: list[float] = []
+
+    def get(self, url, **kwargs):
+        import time
+
+        self.requested_urls.append(url)
+        self.request_epochs.append(time.time())
+        return FakeBookingResponse(self.body, self.headers)
+
+
+class TestBookingCourts:
+    def test_sends_the_url_it_was_handed(self):
+        """URL 在截止時刻之前就組好，開搶那一刻不做字串運算。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession()
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert session.requested_urls == ["https://example.invalid/book"]
+        assert attempt.success is True
+        assert attempt.hour == 20
+
+    def test_waits_for_the_event_before_sending(self):
+        """task 要在倒數結束前就掛好，時間到只做 event.set()。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession()
+
+        async def scenario():
+            ready = asyncio.Event()
+            task = asyncio.create_task(
+                service.booking_courts(
+                    session=session,
+                    booking_url="https://example.invalid/book",
+                    hour=20,
+                    ready_event=ready,
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert session.requested_urls == [], "還沒放行就送出了"
+            ready.set()
+            return await task
+
+        asyncio.run(scenario())
+        assert session.requested_urls == ["https://example.invalid/book"]
+
+    def test_reports_a_lost_race_without_raising(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(body="PT=1&X=2")
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert attempt.success is False
+        assert attempt.error is None
+
+    def test_an_unrecognised_response_is_recorded_not_raised(self):
+        """一發失敗絕不能連坐另一發，所以例外要收在結果物件裡。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(body="尚未開放預約")
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert attempt.success is None
+        assert attempt.error is not None
+
+    def test_records_the_send_instant_and_round_trip(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(headers={"Date": "Thu, 04 Sep 2025 16:00:00 GMT"})
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert attempt.sent_epoch > 0
+        assert attempt.rtt >= 0
+        assert attempt.server_date == "Thu, 04 Sep 2025 16:00:00 GMT"
+
+
+class TestWarmUp:
+    def test_opens_both_pages_concurrently(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(
+            body="<html></html>", headers={"Connection": "keep-alive"}
+        )
+
+        results = asyncio.run(
+            service.warm_up(session=session, year=2026, month=9, day=17)
+        )
+        assert len(results) == 2
+        assert len(session.requested_urls) == 2
+        assert all(result.ok for result in results)
+
+    def test_reports_the_keep_alive_verdict(self):
+        """若伺服器回 Connection: close，預熱就是白做，使用者必須看得見。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(
+            body="<html></html>",
+            headers={"Connection": "close", "Keep-Alive": "timeout=5"},
+        )
+
+        results = asyncio.run(
+            service.warm_up(session=session, year=2026, month=9, day=17)
+        )
+        assert results[0].connection == "close"
+        assert results[0].keep_alive == "timeout=5"
+
+    def test_returns_the_list_page_body_for_slot_inspection(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(body=LIST_PAGE_HTML)
+
+        results = asyncio.run(
+            service.warm_up(session=session, year=2026, month=9, day=17)
+        )
+        assert results[0].body == LIST_PAGE_HTML
+
+    def test_a_failed_warm_up_degrades_instead_of_raising(self):
+        """預熱失敗只是回到冷連線，不比現況差，絕不能中斷搶場地。"""
+
+        class ExplodingSession:
+            def get(self, url, **kwargs):
+                raise OSError("模擬連線中斷")
+
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        results = asyncio.run(
+            service.warm_up(session=ExplodingSession(), year=2026, month=9, day=17)
+        )
+        assert all(result.ok is False for result in results)
