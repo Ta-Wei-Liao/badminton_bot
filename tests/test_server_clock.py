@@ -12,6 +12,17 @@ from badminton_bot.utils.server_clock import (
     parse_http_date,
 )
 
+import asyncio
+import random
+from email.utils import formatdate
+
+from badminton_bot.utils.server_clock import (
+    MAX_USEFUL_UNCERTAINTY_SECONDS,
+    ClockMeasurement,
+    is_sample_usable,
+    measure_server_clock,
+)
+
 
 class TestParseHttpDate:
     def test_parses_an_rfc_7231_date(self):
@@ -108,3 +119,165 @@ class TestConvergence:
         """精度下限是 RTT，超過就沒有資訊增益了 —— 這是請求數量的天花板。"""
         _, widths = self.simulate(theta_true=0.187, rtt=0.024, probe_count=16)
         assert widths[-1] >= 0.024
+
+
+class FakeResponse:
+    def __init__(self, headers: dict[str, str]):
+        self.headers = headers
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def text(self):
+        return "<html></html>"
+
+
+class FakeSession:
+    """Answers every GET with a Date generated from a fixed clock skew."""
+
+    def __init__(self, theta_true: float, rtt: float = 0.0, extra_headers=None):
+        self.theta_true = theta_true
+        self.rtt = rtt
+        self.extra_headers = extra_headers or {}
+        self.requested_urls: list[str] = []
+
+    def get(self, url, **kwargs):
+        import time
+
+        self.requested_urls.append(url)
+        server_now = time.time() - self.theta_true
+        headers = {"Date": formatdate(timeval=server_now, usegmt=True)}
+        headers.update(self.extra_headers)
+        return FakeResponse(headers)
+
+
+class TestIsSampleUsable:
+    def test_accepts_a_freshly_generated_response(self):
+        usable, _ = is_sample_usable({"Date": "Thu, 04 Sep 2025 16:00:00 GMT"})
+        assert usable is True
+
+    def test_rejects_a_response_with_no_date(self):
+        usable, reason = is_sample_usable({})
+        assert usable is False
+        assert "Date" in reason
+
+    def test_rejects_a_cached_response(self):
+        """Age > 0 代表這個 Date 是舊的，拿來校時會把我們帶偏。"""
+        usable, _ = is_sample_usable(
+            {"Date": "Thu, 04 Sep 2025 16:00:00 GMT", "Age": "37"}
+        )
+        assert usable is False
+
+    def test_accepts_an_age_of_zero(self):
+        usable, _ = is_sample_usable(
+            {"Date": "Thu, 04 Sep 2025 16:00:00 GMT", "Age": "0"}
+        )
+        assert usable is True
+
+    def test_rejects_a_proxy_cache_hit(self):
+        usable, _ = is_sample_usable(
+            {"Date": "Thu, 04 Sep 2025 16:00:00 GMT", "X-Cache": "HIT from edge"}
+        )
+        assert usable is False
+
+
+class TestMeasureServerClock:
+    def test_measures_an_offset_it_was_never_told(self):
+        session = FakeSession(theta_true=0.35)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=8,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is not None
+        assert abs(measurement.theta - 0.35) < MAX_USEFUL_UNCERTAINTY_SECONDS
+        # 收斂到夠窄就提前收手，所以次數是上限而不是定值
+        assert 4 <= measurement.probe_count <= 8
+
+    def test_stops_at_the_probe_budget(self):
+        session = FakeSession(theta_true=0.0)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=3,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.probe_count <= 3
+        assert len(session.requested_urls) <= 3
+
+    def test_a_deadline_already_past_yields_no_measurement(self):
+        session = FakeSession(theta_true=0.0)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() - 1,
+                budget=8,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        assert session.requested_urls == []
+
+    def test_cached_responses_are_discarded_not_trusted(self):
+        session = FakeSession(theta_true=0.0, extra_headers={"Age": "99"})
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=4,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        assert measurement.discarded_count == 4
+
+    def test_a_request_error_degrades_instead_of_raising(self):
+        class ExplodingSession:
+            requested_urls: list[str] = []
+
+            def get(self, url, **kwargs):
+                raise OSError("模擬連線中斷")
+
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=ExplodingSession(),
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=3,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+
+
+class TestClockMeasurement:
+    def test_rtt_median_of_no_samples_is_zero(self):
+        assert ClockMeasurement(theta=None, uncertainty=0.0).rtt_median == 0.0
+
+    def test_rtt_median_ignores_an_outlier(self):
+        measurement = ClockMeasurement(
+            theta=0.0, uncertainty=0.0, rtt_samples=[0.020, 0.022, 0.900]
+        )
+        assert measurement.rtt_median == 0.022
