@@ -392,3 +392,17 @@ class TestParseSlotState:
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         html = '<a onclick="Step3Action( 1199 , 20 )">'
         assert service.parse_slot_state(html, hour=20) == SLOT_AVAILABLE
+
+    def test_incidental_substring_in_unrelated_content_does_not_trigger_taken(self):
+        """中山的 QPid=84 太短，很容易在圖檔名裡撞到（place0841.png）。
+        那不代表我們的場地被預約了 —— 只是巧合的字串。不該謊報成已訂。"""
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        html = '<img src="img/place0841.png">'
+        assert service.parse_slot_state(html, hour=20) == SLOT_UNKNOWN
+
+    def test_our_court_at_another_hour_reads_as_taken(self):
+        """我們的場地確實出現在頁面上（Step3Action 呼叫），只是不在我們查詢的時段。
+        那表示那個時段已經被訂走了。"""
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        html = '<a onclick="Step3Action(84, 19)"><img src="img/place01.png"></a>'
+        assert service.parse_slot_state(html, hour=20) == SLOT_TAKEN

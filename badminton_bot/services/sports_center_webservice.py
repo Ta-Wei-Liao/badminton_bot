@@ -301,11 +301,15 @@ class SportsCenterWebService(ABC):
         bookable = re.compile(
             rf"Step3Action\(\s*{qpid}\s*,\s*0?{hour}\s*\)"
         )
+        # 我們的場地出現在頁面上（任何時段皆可），才有資格說「已訂」；
+        # 只是字串裡湊巧出現這個數字不算 —— 中山的 QPid=84 太短，
+        # 很容易在圖檔名或 id 裡撞到，那會謊報成已訂。
+        mentioned = re.compile(rf"Step3Action\(\s*{qpid}\s*,")
 
         if bookable.search(html):
             return SLOT_AVAILABLE
 
-        if str(qpid) in html:
+        if mentioned.search(html):
             return SLOT_TAKEN
 
         return SLOT_UNKNOWN
