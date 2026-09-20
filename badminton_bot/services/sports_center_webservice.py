@@ -3,9 +3,10 @@
 import asyncio
 import logging
 import re
+import statistics
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 import aiohttp
@@ -43,6 +44,86 @@ CONNECT_TIMEOUT_SECONDS = 3.0
 # 丟掉「到底有沒有搶到」的紀錄比多等一會兒更糟 —— 儀表是使用者唯一的回饋，
 # 所以這一發單獨放寬上限。
 BOOKING_TIMEOUT_SECONDS = 30.0
+
+
+# 單程飛行時間的上限。台灣主機超過這個數，代表量到的不是網路飛行時間。
+MAX_ONE_WAY_SECONDS = 0.2
+
+# 握手包含 TCP 一個往返加 TLS 一個往返（TLS 1.3），也就是四段單程。
+HANDSHAKE_ONE_WAY_TRIPS = 4
+
+
+@dataclass
+class HandshakeTiming:
+    """Network flight time measured from connection setup, not from responses.
+
+    Half the response time is the obvious flight-time estimate and it is wrong
+    against a slow origin: this booking site was measured taking ~5 seconds to
+    answer on an already-warmed connection, nearly all of it application work.
+    A TCP/TLS handshake contains no application processing at all, so it is the
+    one thing on the wire that measures the network alone.
+    """
+
+    handshake_samples: list[float] = field(default_factory=list)
+
+    def record(self, seconds: float) -> None:
+        """Record one connection setup, excluding DNS."""
+        if seconds > 0:
+            self.handshake_samples.append(seconds)
+
+    @property
+    def one_way_estimate(self) -> float:
+        """Estimated one-way flight time in seconds, or 0.0 with no samples.
+
+        Returns 0.0 rather than guessing when every connection was reused —
+        no compensation is safer than a compensation built on nothing.
+        """
+        if not self.handshake_samples:
+            return 0.0
+
+        median = statistics.median(self.handshake_samples)
+        return min(median / HANDSHAKE_ONE_WAY_TRIPS, MAX_ONE_WAY_SECONDS)
+
+
+def build_handshake_tracer(
+    timing: HandshakeTiming,
+) -> aiohttp.TraceConfig:
+    """Wire aiohttp's tracing so every fresh connection reports its setup cost.
+
+    Args:
+        timing (HandshakeTiming): the collector to fill.
+
+    Returns:
+        aiohttp.TraceConfig: attach this to the session.
+    """
+    trace = aiohttp.TraceConfig()
+
+    async def _on_dns_start(session, context, params):
+        context.dns_started_at = time.perf_counter()
+
+    async def _on_dns_end(session, context, params):
+        started_at = getattr(context, "dns_started_at", None)
+        if started_at is not None:
+            context.dns_seconds = time.perf_counter() - started_at
+
+    async def _on_connection_start(session, context, params):
+        context.connection_started_at = time.perf_counter()
+
+    async def _on_connection_end(session, context, params):
+        started_at = getattr(context, "connection_started_at", None)
+        if started_at is None:
+            return
+
+        # connection_create 包含 DNS，扣掉才是純粹的 TCP + TLS 握手
+        elapsed = time.perf_counter() - started_at
+        timing.record(elapsed - getattr(context, "dns_seconds", 0.0))
+
+    trace.on_dns_resolvehost_start.append(_on_dns_start)
+    trace.on_dns_resolvehost_end.append(_on_dns_end)
+    trace.on_connection_create_start.append(_on_connection_start)
+    trace.on_connection_create_end.append(_on_connection_end)
+
+    return trace
 
 
 @dataclass
@@ -332,6 +413,7 @@ class SportsCenterWebService(ABC):
         Returns:
             aiohttp.ClientSession: a session with pooled, browser-looking requests.
         """
+        self.handshake_timing = HandshakeTiming()
         connector = aiohttp.TCPConnector(
             limit=CONNECTION_LIMIT,
             ttl_dns_cache=DNS_CACHE_SECONDS,
@@ -343,6 +425,7 @@ class SportsCenterWebService(ABC):
             connector=connector,
             cookies=cookies,
             headers=build_browser_headers(referer=referer),
+            trace_configs=[build_handshake_tracer(self.handshake_timing)],
             timeout=aiohttp.ClientTimeout(
                 total=SESSION_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
             ),

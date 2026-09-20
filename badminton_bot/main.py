@@ -21,8 +21,16 @@ from badminton_bot.utils.input_helper import (
     transform_yes_no_input,
 )
 from badminton_bot.utils.ntp_client import query_clock_offset
-from badminton_bot.utils.server_clock import ClockMeasurement, measure_server_clock
-from badminton_bot.utils.timing import plan_send_time, sleep_then_spin
+from badminton_bot.utils.server_clock import (
+    ClockMeasurement,
+    measure_server_clock,
+    seed_interval,
+)
+from badminton_bot.utils.timing import (
+    MAX_AUTO_CORRECTION_SECONDS,
+    plan_send_time,
+    sleep_then_spin,
+)
 
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
 UPCOMING_BOOKING_DATE = (
@@ -337,6 +345,9 @@ async def main():
                     session=session,
                     url=referer,
                     deadline_epoch=probe_deadline_epoch,
+                    # 用 NTP 把搜尋區間平移到對的位置。本機時鐘差幾秒時，
+                    # 預設的 (-2, 2) 會讓真值落在區間外，第一次探測就必然矛盾。
+                    initial_interval=seed_interval(theta_ntp),
                 ),
                 budget_seconds=probe_deadline_epoch - time.time(),
                 label="伺服器時鐘探測",
@@ -390,18 +401,28 @@ async def main():
                         ),
                     )
 
+            # 補償用的是握手量到的飛行時間，不是回應時間 —— 這個站的回應時間
+            # 幾乎都是伺服器處理，拿它的一半去補償會把請求提早好幾秒送出。
+            one_way_seconds = service.handshake_timing.one_way_estimate
+            logging.info(
+                "單程飛行時間估計 %.1f 毫秒（取自 %d 次握手；回應時間中位數 %.1f 毫秒）",
+                one_way_seconds * 1000,
+                len(service.handshake_timing.handshake_samples),
+                measurement.rtt_median * 1000,
+            )
+
             send_at_epoch, source, within_clamp = plan_send_time(
                 nominal_epoch=nominal_epoch,
                 theta_srv=measurement.theta,
                 uncertainty=measurement.uncertainty,
                 theta_ntp=theta_ntp,
-                rtt_median=measurement.rtt_median,
+                one_way_seconds=one_way_seconds,
                 manual_offset_ms=0,
             )
             if not within_clamp:
                 logging.warning(
-                    "量到的時鐘修正量超出 ±%.1f 秒的上限，已拒絕套用",
-                    2.0,
+                    "量到的時鐘修正量超出 ±%.0f 秒的上限，已拒絕套用，本次不做任何校正",
+                    MAX_AUTO_CORRECTION_SECONDS,
                 )
             logging.info(
                 "送出時刻相對名目開放時刻 %+.1f 毫秒（來源：%s）",

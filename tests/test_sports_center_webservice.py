@@ -650,3 +650,89 @@ class TestWarmUp:
             service.warm_up(session=ExplodingSession(), year=2026, month=9, day=17)
         )
         assert all(result.ok is False for result in results)
+
+
+from badminton_bot.services.sports_center_webservice import (
+    MAX_ONE_WAY_SECONDS,
+    HandshakeTiming,
+    build_handshake_tracer,
+)
+
+
+class TestHandshakeTiming:
+    """回應時間包含伺服器處理，握手不包含 —— 這是唯一能分離出飛行時間的量法。
+
+    實測那個站在已預熱的連線上仍要 5.3 秒才回應，幾乎全是應用層處理。
+    照回應時間去補償會把請求提早 2.5 秒送出，那是硬失敗。
+    """
+
+    def test_no_handshake_means_no_compensation(self):
+        """連線全部重用、沒有新握手時，寧可不補償也不要亂猜。"""
+        assert HandshakeTiming().one_way_estimate == 0.0
+
+    def test_estimates_one_way_as_a_quarter_of_the_handshake(self):
+        """TCP 一個往返 + TLS 一個往返 = 兩個往返 = 四段單程。"""
+        timing = HandshakeTiming()
+        timing.record(0.080)
+        assert timing.one_way_estimate == pytest.approx(0.020)
+
+    def test_uses_the_median_of_several_handshakes(self):
+        timing = HandshakeTiming()
+        for seconds in (0.080, 0.084, 0.600):
+            timing.record(seconds)
+        assert timing.one_way_estimate == pytest.approx(0.021)
+
+    def test_caps_an_implausible_estimate(self):
+        """台灣主機的單程飛行不可能是這個數量級，量到就是摻了別的東西。"""
+        timing = HandshakeTiming()
+        timing.record(20.0)
+        assert timing.one_way_estimate == MAX_ONE_WAY_SECONDS
+
+    def test_ignores_a_non_positive_sample(self):
+        timing = HandshakeTiming()
+        timing.record(0.0)
+        timing.record(-1.0)
+        assert timing.one_way_estimate == 0.0
+
+
+class TestHandshakeTracerWiring:
+    """握手是否真的被記錄下來只有連上網才驗得到，但「掛在哪個訊號上」可以離線驗。
+
+    掛錯訊號名稱是這段最可能的失敗方式，而它會安靜地讓飛行時間永遠是 0。
+    """
+
+    def test_subscribes_to_the_signals_that_bracket_a_handshake(self):
+        timing = HandshakeTiming()
+        trace = build_handshake_tracer(timing)
+        assert len(trace.on_connection_create_start) == 1
+        assert len(trace.on_connection_create_end) == 1
+        assert len(trace.on_dns_resolvehost_start) == 1
+        assert len(trace.on_dns_resolvehost_end) == 1
+
+    def test_the_callbacks_record_a_handshake_with_dns_subtracted(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        timing = HandshakeTiming()
+        trace = build_handshake_tracer(timing)
+        context = SimpleNamespace()
+
+        async def drive():
+            await trace.on_connection_create_start[0](None, context, None)
+            await trace.on_dns_resolvehost_start[0](None, context, None)
+            await trace.on_dns_resolvehost_end[0](None, context, None)
+            await trace.on_connection_create_end[0](None, context, None)
+
+        asyncio.run(drive())
+        assert len(timing.handshake_samples) == 1
+        assert timing.handshake_samples[0] >= 0
+
+    def test_a_connection_end_without_a_start_is_ignored(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        timing = HandshakeTiming()
+        trace = build_handshake_tracer(timing)
+
+        asyncio.run(trace.on_connection_create_end[0](None, SimpleNamespace(), None))
+        assert timing.handshake_samples == []

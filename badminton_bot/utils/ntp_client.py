@@ -115,6 +115,10 @@ def query_clock_offset(
     if theta is None:
         logging.warning("NTP 校時全部失敗，改用未校正的本機時鐘")
     else:
-        logging.info("NTP 校時完成：本機時鐘比標準時間快 %.1f 毫秒", theta * 1000)
+        logging.info(
+            "NTP 校時完成：本機時鐘比標準時間%s %.1f 毫秒",
+            "快" if theta > 0 else "慢",
+            abs(theta) * 1000,
+        )
 
     return theta

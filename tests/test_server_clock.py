@@ -370,3 +370,84 @@ class TestClockMeasurement:
             theta=0.0, uncertainty=0.0, rtt_samples=[0.020, 0.022, 0.900]
         )
         assert measurement.rtt_median == 0.022
+
+
+from badminton_bot.utils.server_clock import (
+    MAX_USEFUL_UNCERTAINTY_SECONDS,
+    WIDE_INITIAL_INTERVAL,
+    seed_interval,
+)
+
+
+class TestSeedInterval:
+    """本機時鐘慢 2.65 秒時，(-2, 2) 的起始假設讓第一次探測必然矛盾。
+
+    解法不是放寬區間（每寬一倍就多要一次探測），而是用 NTP 把它平移到對的地方。
+    """
+
+    def test_centres_the_search_on_the_ntp_estimate(self):
+        low, high = seed_interval(theta_ntp=-2.652)
+        assert low < -2.652 < high
+        assert (low, high) == pytest.approx((-4.652, -0.652))
+
+    def test_keeps_the_window_narrow_enough_to_converge(self):
+        low, high = seed_interval(theta_ntp=-2.652)
+        assert high - low == pytest.approx(4.0)
+
+    def test_falls_back_to_a_wide_window_without_ntp(self):
+        assert seed_interval(theta_ntp=None) == WIDE_INITIAL_INTERVAL
+
+    def test_a_seeded_search_converges_on_a_badly_wrong_clock(self):
+        """真值 -2.652 落在種子區間正中央，8 次探測照樣收斂。"""
+        theta_true = -2.652
+        interval = seed_interval(theta_ntp=-2.60)
+        clock = 1_000_000.0
+        for _ in range(8):
+            clock = next_probe_phase(interval=interval, earliest=clock + 1.0)
+            server_date = math.floor(clock + 0.012 - theta_true)
+            narrowed = intersect(
+                interval, constrain(clock, clock + 0.024, server_date)
+            )
+            assert narrowed is not None
+            interval = narrowed
+
+        assert interval[0] < theta_true <= interval[1]
+        assert (interval[1] - interval[0]) / 2 <= MAX_USEFUL_UNCERTAINTY_SECONDS
+
+
+class TestStopConditionAbsoluteCeiling:
+    """實測發現的洞：RTT 4.6 秒把停止門檻放大到 9.3 秒，跑一次探測就收工。"""
+
+    def test_a_huge_response_time_does_not_stop_probing_early(self):
+        session = FakeSession(theta_true=0.0)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=6,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+                initial_interval=(-2.0, 2.0),
+            )
+        )
+        # 舊行為：巨大的 RTT 讓它一次就停。新行為：必須真的收斂才停。
+        assert measurement.probe_count > 1
+
+    def test_never_stops_while_still_too_wide_to_be_usable(self):
+        session = FakeSession(theta_true=0.0)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=8,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+                initial_interval=(-2.0, 2.0),
+            )
+        )
+        assert measurement.theta is not None
+        assert measurement.uncertainty <= MAX_USEFUL_UNCERTAINTY_SECONDS

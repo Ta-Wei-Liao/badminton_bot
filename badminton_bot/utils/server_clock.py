@@ -22,8 +22,16 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Mapping
 
-# 開場假設：本機與伺服器相差不超過兩秒。
+# 開場假設：本機與伺服器相差不超過兩秒。只有在完全沒有 NTP 估計時才這樣賭 ——
+# 實測遇過本機時鐘慢 2.65 秒的機器，那會讓第一次探測必然矛盾。見 seed_interval。
 INITIAL_INTERVAL = (-2.0, 2.0)
+
+# 沒有 NTP 可以定錨時的保守起始區間。夠寬到不會誤判矛盾，
+# 但 8 次探測通常收斂不完，log 會誠實回報量測失敗。
+WIDE_INITIAL_INTERVAL = (-30.0, 30.0)
+
+# 以 NTP 估計為中心時，往兩邊各留這麼多餘裕。
+SEED_HALF_WIDTH_SECONDS = 2.0
 
 
 def parse_http_date(value: str) -> float:
@@ -43,6 +51,31 @@ def parse_http_date(value: str) -> float:
         raise ValueError(f"無法解析的 Date header：{value!r}")
 
     return parsed.timestamp()
+
+
+def seed_interval(
+    theta_ntp: float | None, half_width: float = SEED_HALF_WIDTH_SECONDS
+) -> tuple[float, float]:
+    """Centre the search where NTP says the offset is, rather than on zero.
+
+    Widening the starting interval is the obvious response to a badly wrong
+    local clock, but every doubling costs one more probe to converge and the
+    budget is eight. Shifting it costs nothing: NTP already tells us roughly
+    where theta lies, so a narrow window centred there converges just as fast
+    as one centred on zero would have, while surviving a clock that is seconds
+    out.
+
+    Args:
+        theta_ntp (float | None): local-minus-standard-time offset, seconds.
+        half_width (float, optional): slack either side of the estimate.
+
+    Returns:
+        tuple[float, float]: the interval to start the binary search from.
+    """
+    if theta_ntp is None:
+        return WIDE_INITIAL_INTERVAL
+
+    return (theta_ntp - half_width, theta_ntp + half_width)
 
 
 def constrain(
@@ -201,6 +234,7 @@ async def measure_server_clock(
     rng: random.Random | None = None,
     min_gap: float = MIN_PROBE_GAP_SECONDS,
     max_gap: float = MAX_PROBE_GAP_SECONDS,
+    initial_interval: tuple[float, float] = INITIAL_INTERVAL,
 ) -> ClockMeasurement:
     """Binary-search the booking server's clock offset via its Date header.
 
@@ -216,12 +250,15 @@ async def measure_server_clock(
         min_gap (float, optional): shortest gap between probes, seconds.
         max_gap (float, optional): longest gap between probes, seconds. Tests
             pass tiny values here so the suite does not really wait minutes.
+        initial_interval (tuple[float, float], optional): where to start the
+            search. Pass seed_interval(theta_ntp) so a wrong local clock does
+            not put the true offset outside the opening assumption.
 
     Returns:
         ClockMeasurement: theta and its uncertainty, plus RTT samples.
     """
     rng = rng or random.Random()
-    interval = INITIAL_INTERVAL
+    interval = initial_interval
     rtt_samples: list[float] = []
     probe_count = 0
     discarded_count = 0
@@ -300,14 +337,21 @@ async def measure_server_clock(
             width,
         )
 
-        if width <= max(2 * statistics.median(rtt_samples), MIN_USEFUL_WIDTH_SECONDS):
+        # 收斂目標受 RTT 限制（量不出比往返時間更細的東西），但要有絕對上限：
+        # 實測遇過回應時間 4.6 秒的站，那會把門檻放大到 9.3 秒，
+        # 一次探測就「達標」收工，最後交出一個寬到會被丟棄的區間。
+        convergence_target = min(
+            max(2 * statistics.median(rtt_samples), MIN_USEFUL_WIDTH_SECONDS),
+            2 * MAX_USEFUL_UNCERTAINTY_SECONDS,
+        )
+        if width <= convergence_target:
             break
 
     uncertainty = (interval[1] - interval[0]) / 2
 
     if (
         not rtt_samples
-        or interval == INITIAL_INTERVAL
+        or interval == initial_interval
         or uncertainty > MAX_USEFUL_UNCERTAINTY_SECONDS
     ):
         if uncertainty > MAX_USEFUL_UNCERTAINTY_SECONDS and rtt_samples:
