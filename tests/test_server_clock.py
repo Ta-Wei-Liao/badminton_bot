@@ -451,3 +451,82 @@ class TestStopConditionAbsoluteCeiling:
         )
         assert measurement.theta is not None
         assert measurement.uncertainty <= MAX_USEFUL_UNCERTAINTY_SECONDS
+
+
+from badminton_bot.utils.server_clock import MAX_PROBEABLE_RTT_SECONDS
+
+
+class SlowSession:
+    """Answers correctly but slowly, like an origin doing real database work."""
+
+    def __init__(self, response_seconds: float):
+        self.response_seconds = response_seconds
+        self.requested_urls: list[str] = []
+
+    def get(self, url, **kwargs):
+        self.requested_urls.append(url)
+        return SlowResponse(self.response_seconds)
+
+
+class SlowResponse:
+    def __init__(self, response_seconds: float):
+        self.response_seconds = response_seconds
+        import time as _time
+
+        self.headers = {"Date": formatdate(timeval=_time.time(), usegmt=True)}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def text(self):
+        await asyncio.sleep(self.response_seconds)
+        return "<html></html>"
+
+
+class TestProbingIsAbandonedWhenItCannotPossiblyConverge:
+    """實測發現：那個預約站回應要 4.3 秒，而單次探測的約束寬度是 1 + RTT。
+
+    收斂下限就是 RTT，不確定度下限是 RTT/2。當 RTT/2 已經超過採用門檻時，
+    再打幾次探測都不可能產出可用結果 —— 那只是對一個真實帳號白送請求。
+    這件事在第一次探測拿到 RTT 之後就算得出來。
+    """
+
+    def test_gives_up_after_the_first_probe_when_the_site_is_too_slow(self):
+        session = SlowSession(response_seconds=MAX_PROBEABLE_RTT_SECONDS + 0.2)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=8,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        assert measurement.probe_count == 1
+        assert len(session.requested_urls) == 1
+
+    def test_the_threshold_follows_from_the_acceptance_threshold(self):
+        """門檻不是隨手挑的：不確定度下限是 RTT/2，要能 ≤ 採用門檻。"""
+        assert MAX_PROBEABLE_RTT_SECONDS == 2 * MAX_USEFUL_UNCERTAINTY_SECONDS
+
+    def test_a_fast_site_is_still_probed_to_the_budget(self):
+        session = FakeSession(theta_true=0.2)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=8,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.probe_count > 1
+        assert measurement.theta is not None

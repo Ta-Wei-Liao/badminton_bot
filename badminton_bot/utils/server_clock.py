@@ -162,6 +162,12 @@ MIN_USEFUL_WIDTH_SECONDS = 0.02
 # 用一個 ±0.5 秒的估計反而保證送晚半秒，比不修正還糟。
 MAX_USEFUL_UNCERTAINTY_SECONDS = 0.15
 
+# 單次探測推出的區間寬度是 1 + RTT，所以收斂下限就是 RTT，不確定度下限是 RTT/2。
+# RTT/2 一旦超過採用門檻，再打幾次探測都不可能產出會被接受的結果。
+# 實測那個預約站回應要 4.3 秒（不確定度下限 2.15 秒，門檻的 14 倍），
+# 原本會白白打滿 8 次探測才發現。
+MAX_PROBEABLE_RTT_SECONDS = 2 * MAX_USEFUL_UNCERTAINTY_SECONDS
+
 
 @dataclass
 class ClockMeasurement:
@@ -307,6 +313,26 @@ async def measure_server_clock(
             continue
 
         rtt_samples.append(t3 - t0)
+
+        # 可行性前置判斷。單一慢樣本有可能誤判，但誤判的代價只是退回 NTP ——
+        # 跟對一個真實帳號白送七個請求相比，那個代價便宜得多。
+        observed_rtt = statistics.median(rtt_samples)
+        if observed_rtt / 2 > MAX_USEFUL_UNCERTAINTY_SECONDS:
+            logging.warning(
+                "回應時間 %.0f 毫秒，不確定度下限 ±%.0f 毫秒已超過採用門檻 ±%.0f 毫秒，"
+                "再探測也不可能收斂，放棄伺服器校時",
+                observed_rtt * 1000,
+                observed_rtt / 2 * 1000,
+                MAX_USEFUL_UNCERTAINTY_SECONDS * 1000,
+            )
+            return ClockMeasurement(
+                theta=None,
+                uncertainty=0.0,
+                rtt_samples=rtt_samples,
+                probe_count=probe_count,
+                discarded_count=discarded_count,
+            )
+
         narrowed = intersect(interval, constrain(t0, t3, server_date))
 
         if narrowed is None:
