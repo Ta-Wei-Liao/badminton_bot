@@ -272,3 +272,64 @@ class TestSetLogger:
         first = len(_logging.getLogger().handlers)
         set_logger(log_dir=tmp_path)
         assert len(_logging.getLogger().handlers) == first
+
+
+class TestReportSlotStatesDistinguishesNotYetOpen:
+    """週四 T-40s 時，要搶的那一天還沒進入預約窗口，頁面不會渲染它。
+
+    「還空著 0 片」讀起來像全被掃光，但實際上是「這一天根本還看不到」。
+    這兩件事必須在 log 裡分得開，否則開搶前那行會誤導判讀。
+    """
+
+    @staticmethod
+    def _service():
+        from badminton_bot.services.zhongzheng_sports_center_webservice import (
+            ZhongzhengSportsCenterWebService,
+        )
+
+        return object.__new__(ZhongzhengSportsCenterWebService)
+
+    def test_says_the_window_is_not_open_yet(self, caplog):
+        from badminton_bot.main import report_slot_states
+
+        with caplog.at_level("INFO"):
+            report_slot_states(
+                service=self._service(),
+                html="<html>查無資料</html>",
+                booking_periods=(datetime(2026, 9, 27, 20),),
+                label="開放前",
+            )
+
+        assert "尚未進入預約窗口" in caplog.text
+        assert "還空著 0 片" not in caplog.text
+
+    def test_a_genuinely_swept_hour_is_not_mistaken_for_a_closed_window(self, caplog):
+        """頁面有渲染我們的場地（別的時段可訂），所以 0 片是真的被掃光。"""
+        from badminton_bot.main import report_slot_states
+
+        html = '<a onclick="Step3Action(1199, 19)"></a>'
+        with caplog.at_level("INFO"):
+            report_slot_states(
+                service=self._service(),
+                html=html,
+                booking_periods=(datetime(2026, 9, 27, 20),),
+                label="開放後",
+            )
+
+        assert "尚未進入預約窗口" not in caplog.text
+        assert "還空著 0 片" in caplog.text
+
+    def test_an_ordinary_census_is_unchanged(self, caplog):
+        from badminton_bot.main import report_slot_states
+
+        html = '<a onclick="Step3Action(1196, 20)"></a><a onclick="Step3Action(1199, 20)"></a>'
+        with caplog.at_level("INFO"):
+            report_slot_states(
+                service=self._service(),
+                html=html,
+                booking_periods=(datetime(2026, 9, 27, 20),),
+                label="開放後",
+            )
+
+        assert "還空著 2 片" in caplog.text
+        assert "1196" in caplog.text

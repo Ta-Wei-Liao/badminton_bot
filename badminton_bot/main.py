@@ -6,7 +6,11 @@ from pathlib import Path
 import time
 from datetime import datetime, timedelta
 
-from badminton_bot.services.sports_center_webservice import BookingAttempt, SportsCenterWebService
+from badminton_bot.services.sports_center_webservice import (
+    SLOT_UNKNOWN,
+    BookingAttempt,
+    SportsCenterWebService,
+)
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
 )
@@ -95,11 +99,24 @@ def report_slot_states(service, html: str | None, booking_periods, label: str) -
 
     for booking_date in booking_periods:
         available = service.parse_available_courts(html, hour=booking_date.hour)
+        state = service.parse_slot_state(html, hour=booking_date.hour)
+
+        # 開搶前要的那一天還沒進入預約窗口，頁面根本不會渲染它 —— 此時
+        # 「還空著 0 片」讀起來像全被掃光，但真相是這一天還看不到。
+        # 頁面完全沒提到我們的場地（連別的時段都沒有），就是這種情況。
+        if state == SLOT_UNKNOWN and not available:
+            logging.info(
+                "%s %d 點：該日期尚未進入預約窗口，頁面看不到這一天（開搶前的正常狀態）",
+                label,
+                booking_date.hour,
+            )
+            continue
+
         logging.info(
             "%s %d 點：目標場地 %s｜該時段還空著 %d 片%s",
             label,
             booking_date.hour,
-            service.parse_slot_state(html, hour=booking_date.hour),
+            state,
             len(available),
             f"（{available}）" if available else "",
         )
