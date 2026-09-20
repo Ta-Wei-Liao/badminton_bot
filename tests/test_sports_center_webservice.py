@@ -479,6 +479,9 @@ class FakeBookingResponse:
     async def text(self):
         return self.body
 
+    async def read(self):
+        return self.body.encode("utf-8")
+
 
 class RecordingSession:
     def __init__(self, body: str = "PT=1&X=1", headers=None):
@@ -812,3 +815,44 @@ class TestStaticAssetWarmUp:
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         for url in service._generate_warm_up_urls():
             assert "module=net_booking" not in url
+
+
+class TestWarmUpReadsBinaryAssets:
+    """實測抓到的 bug：預熱改抓 PNG 之後仍用 response.text()，解 UTF-8 直接爆炸。
+
+    連線有建立起來，但 ok=False 讓 Connection / Keep-Alive 的診斷跟著消失。
+    """
+
+    def test_a_binary_asset_does_not_fail_the_warm_up(self):
+        class BinaryResponse:
+            headers = {"Connection": "keep-alive"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def read(self):
+                return b"\x89PNG\r\n\x1a\n\xde\xad\xbe\xef"
+
+            async def text(self):
+                raise UnicodeDecodeError(
+                    "utf-8", b"\xde", 0, 1, "invalid continuation byte"
+                )
+
+        class BinarySession:
+            def __init__(self):
+                self.requested_urls = []
+
+            def get(self, url, **kwargs):
+                self.requested_urls.append(url)
+                return BinaryResponse()
+
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = BinarySession()
+        results = asyncio.run(service.warm_up(session=session))
+
+        assert all(result.ok for result in results)
+        assert all(result.connection == "keep-alive" for result in results)
+        assert len(session.requested_urls) == 2

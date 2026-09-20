@@ -134,7 +134,6 @@ class WarmUpResult:
     ok: bool
     connection: str | None = None
     keep_alive: str | None = None
-    body: str | None = None
 
 
 @dataclass
@@ -448,13 +447,16 @@ class SportsCenterWebService(ABC):
         async def _open(url: str) -> WarmUpResult:
             try:
                 async with session.get(url) as response:
-                    body = await response.text()
+                    # 一定要把 body 讀完，aiohttp 才會把連線還回連線池 ——
+                    # 沒讀完的連線會被關掉，預熱就白做了。
+                    # 用 read() 而不是 text()：預熱抓的是圖片，拿位元組去解
+                    # UTF-8 會直接拋例外，而我們根本不需要內容。
+                    await response.read()
                     return WarmUpResult(
                         url=url,
                         ok=True,
                         connection=response.headers.get("Connection"),
                         keep_alive=response.headers.get("Keep-Alive"),
-                        body=body,
                     )
             except Exception as error:
                 logging.warning("預熱請求失敗（%s）：%s", url, error)
