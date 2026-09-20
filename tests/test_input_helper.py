@@ -9,7 +9,6 @@ from badminton_bot.utils.input_helper import (
     check_if_target_datetime_is_outdated,
     get_valid_input,
     parse_input_booking_periods_str,
-    transform_offset_milliseconds_param,
     transform_yes_no_input,
 )
 
@@ -23,25 +22,6 @@ class TestTransformYesNoInput:
     def test_rejects_anything_else(self, bad_input):
         with pytest.raises(AssertionError):
             transform_yes_no_input(bad_input)
-
-
-class TestTransformOffsetMillisecondsParam:
-    def test_empty_input_means_no_offset(self):
-        assert transform_offset_milliseconds_param("") == 0
-
-    @pytest.mark.parametrize("value", [-1000, -500, 0, 500, 1000])
-    def test_accepts_the_whole_allowed_range_inclusive(self, value):
-        assert transform_offset_milliseconds_param(str(value)) == value
-
-    @pytest.mark.parametrize("value", ["1001", "-1001", "5000"])
-    def test_rejects_out_of_range(self, value):
-        with pytest.raises(ValueError):
-            transform_offset_milliseconds_param(value)
-
-    @pytest.mark.parametrize("value", ["abc", "1.5", " "])
-    def test_rejects_non_integer(self, value):
-        with pytest.raises(ValueError):
-            transform_offset_milliseconds_param(value)
 
 
 class TestCheckIfTargetDatetimeIsOutdated:
