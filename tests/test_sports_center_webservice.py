@@ -332,21 +332,16 @@ class TestWarmUpUrls:
     def test_warms_two_different_pages(self):
         """兩條熱連線供兩個預約請求各用一條；兩個不同頁面併發載入是一般瀏覽行為。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        urls = service._generate_warm_up_urls(year=2026, month=9, day=17)
+        urls = service._generate_warm_up_urls()
         assert len(urls) == 2
         assert len(set(urls)) == 2
 
     def test_warm_up_never_touches_the_booking_action(self):
         for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
             service = build_without_browser(cls)
-            for url in service._generate_warm_up_urls(year=2026, month=9, day=17):
+            for url in service._generate_warm_up_urls():
                 assert "StepFlag=25" not in url
 
-    def test_includes_the_list_page_and_the_login_page(self):
-        service = build_without_browser(ZhongzhengSportsCenterWebService)
-        urls = service._generate_warm_up_urls(year=2026, month=9, day=17)
-        assert service._generate_list_page_url(2026, 9, 17) in urls
-        assert ZhongzhengSportsCenterWebService.login_page_url in urls
 
 
 # 合成的 fixture，依照既有筆記寫成：可預約的格子帶 Step3Action 呼叫，
@@ -609,7 +604,7 @@ class TestWarmUp:
         )
 
         results = asyncio.run(
-            service.warm_up(session=session, year=2026, month=9, day=17)
+            service.warm_up(session=session)
         )
         assert len(results) == 2
         assert len(session.requested_urls) == 2
@@ -624,19 +619,34 @@ class TestWarmUp:
         )
 
         results = asyncio.run(
-            service.warm_up(session=session, year=2026, month=9, day=17)
+            service.warm_up(session=session)
         )
         assert results[0].connection == "close"
         assert results[0].keep_alive == "timeout=5"
 
-    def test_returns_the_list_page_body_for_slot_inspection(self):
+    def test_the_list_page_is_fetched_separately_now(self):
+        """預熱抓靜態資源，列表頁由 fetch_list_page 單獨處理 —— 它慢，不能卡在最後十秒。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         session = RecordingSession(body=LIST_PAGE_HTML)
 
-        results = asyncio.run(
-            service.warm_up(session=session, year=2026, month=9, day=17)
+        body = asyncio.run(
+            service.fetch_list_page(session=session, year=2026, month=9, day=17)
         )
-        assert results[0].body == LIST_PAGE_HTML
+        assert body == LIST_PAGE_HTML
+        assert "StepFlag=2&" in session.requested_urls[0]
+
+    def test_a_failed_list_page_fetch_returns_none(self):
+        class ExplodingSession:
+            def get(self, url, **kwargs):
+                raise OSError("模擬連線中斷")
+
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        body = asyncio.run(
+            service.fetch_list_page(
+                session=ExplodingSession(), year=2026, month=9, day=17
+            )
+        )
+        assert body is None
 
     def test_a_failed_warm_up_degrades_instead_of_raising(self):
         """預熱失敗只是回到冷連線，不比現況差，絕不能中斷搶場地。"""
@@ -647,7 +657,7 @@ class TestWarmUp:
 
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         results = asyncio.run(
-            service.warm_up(session=ExplodingSession(), year=2026, month=9, day=17)
+            service.warm_up(session=ExplodingSession())
         )
         assert all(result.ok is False for result in results)
 
@@ -736,3 +746,69 @@ class TestHandshakeTracerWiring:
 
         asyncio.run(trace.on_connection_create_end[0](None, SimpleNamespace(), None))
         assert timing.handshake_samples == []
+
+
+from badminton_bot.services.sports_center_webservice import SLOT_UNKNOWN as _SU
+
+
+class TestParseAvailableCourts:
+    """事後偵察要回答的是「這到底是不是毫秒級的搶奪」。
+
+    不寫死場地清單 —— 我們只確定 7-1=1196、7-2=1197，其餘是推論。
+    直接從頁面抓出還掛著 Step3Action 的 qpid，資料自己會說話。
+    """
+
+    def test_lists_every_court_still_bookable_at_that_hour(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        html = """
+        <td><a onclick="Step3Action(1196, 20)"></a></td>
+        <td><a onclick="Step3Action(1199, 20)"></a></td>
+        <td><img src="img/place02.png" title="已被預約"></td>
+        """
+        assert service.parse_available_courts(html, hour=20) == [1196, 1199]
+
+    def test_ignores_other_hours(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        html = '<a onclick="Step3Action(1196, 19)"></a><a onclick="Step3Action(1199, 20)"></a>'
+        assert service.parse_available_courts(html, hour=20) == [1199]
+
+    def test_tolerates_zero_padded_hours(self):
+        service = build_without_browser(ZhongshanSportsCenterWebService)
+        html = '<a onclick="Step3Action(84, 09)"></a>'
+        assert service.parse_available_courts(html, hour=9) == [84]
+
+    def test_a_fully_booked_hour_is_an_empty_list(self):
+        """空清單代表全被掃光 —— 那才是真正的競速。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        assert service.parse_available_courts("<html>查無資料</html>", hour=20) == []
+
+    def test_deduplicates_and_sorts(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        html = '<a onclick="Step3Action(1199,20)"></a><a onclick="Step3Action(1196,20)"></a><a onclick="Step3Action(1199,20)"></a>'
+        assert service.parse_available_courts(html, hour=20) == [1196, 1199]
+
+
+class TestStaticAssetWarmUp:
+    """預熱要的是連線熱著，不是頁面內容。
+
+    實測抓列表頁要 4~5 秒，從 T-10s 開始會跑到 T-4.6s 才結束，差點被預算砍掉。
+    靜態資源由 Cloudflare 邊緣直接回，約 50 毫秒。
+    """
+
+    def test_warm_up_urls_are_two_distinct_static_assets(self):
+        for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
+            service = build_without_browser(cls)
+            urls = service._generate_warm_up_urls()
+            assert len(urls) == 2
+            assert len(set(urls)) == 2
+
+    def test_warm_up_never_touches_the_booking_action(self):
+        for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
+            service = build_without_browser(cls)
+            for url in service._generate_warm_up_urls():
+                assert "StepFlag=25" not in url
+
+    def test_warm_up_urls_are_not_the_slow_list_page(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        for url in service._generate_warm_up_urls():
+            assert "module=net_booking" not in url

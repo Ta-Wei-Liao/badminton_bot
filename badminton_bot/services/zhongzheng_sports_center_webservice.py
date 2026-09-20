@@ -42,6 +42,14 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
         else:
             return False
 
+    def _static_asset_urls(self) -> tuple[str, str]:
+        # 列表頁就是用這兩張圖標示可訂／已訂，所以它們確實存在於站上。
+        # 預熱只需要連線建立起來 —— 就算路徑變了拿到 404，連線一樣是熱的。
+        return (
+            "https://bwd.xuanen.com.tw/img/place01.png",
+            "https://bwd.xuanen.com.tw/img/place02.png",
+        )
+
     def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
         # StepFlag=2 是唯讀列表頁，StepFlag=25 才是真的送出預約
         return (

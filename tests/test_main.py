@@ -228,3 +228,47 @@ class TestRunWithDeadline:
         # 沒 await 就得自己關掉，否則會留下 coroutine was never awaited 警告。
         assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
         assert "來不及的階段" in caplog.text
+
+
+class TestSetLogger:
+    """每次執行都留下 log。
+
+    用 logging.FileHandler 而不是 shell 導向：input() 的提示根本不經過 logging，
+    所以憑證在結構上不可能進到檔案裡。
+    """
+
+    def test_creates_a_timestamped_log_file(self, tmp_path):
+        from badminton_bot.main import set_logger
+
+        log_path = set_logger(log_dir=tmp_path)
+        assert log_path.exists()
+        assert log_path.parent == tmp_path
+        assert log_path.suffix == ".log"
+
+    def test_log_records_reach_the_file(self, tmp_path):
+        import logging as _logging
+
+        from badminton_bot.main import set_logger
+
+        log_path = set_logger(log_dir=tmp_path)
+        _logging.info("測試訊息")
+        for handler in _logging.getLogger().handlers:
+            handler.flush()
+        assert "測試訊息" in log_path.read_text(encoding="utf-8")
+
+    def test_creates_the_directory_when_missing(self, tmp_path):
+        from badminton_bot.main import set_logger
+
+        target = tmp_path / "does" / "not" / "exist"
+        log_path = set_logger(log_dir=target)
+        assert log_path.exists()
+
+    def test_repeated_calls_do_not_duplicate_handlers(self, tmp_path):
+        import logging as _logging
+
+        from badminton_bot.main import set_logger
+
+        set_logger(log_dir=tmp_path)
+        first = len(_logging.getLogger().handlers)
+        set_logger(log_dir=tmp_path)
+        assert len(_logging.getLogger().handlers) == first

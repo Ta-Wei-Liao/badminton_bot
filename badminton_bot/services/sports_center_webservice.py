@@ -431,9 +431,7 @@ class SportsCenterWebService(ABC):
             ),
         )
 
-    async def warm_up(
-        self, session, year: int, month: int, day: int
-    ) -> list[WarmUpResult]:
+    async def warm_up(self, session) -> list[WarmUpResult]:
         """Open two read-only pages so two hot connections wait in the pool.
 
         Everything the booking request would otherwise pay for at the opening
@@ -441,14 +439,11 @@ class SportsCenterWebService(ABC):
 
         Args:
             session: the aiohttp session.
-            year (int): the target booking year.
-            month (int): the target booking month.
-            day (int): the target booking day.
 
         Returns:
             list[WarmUpResult]: one entry per warm-up URL, in URL order.
         """
-        urls = self._generate_warm_up_urls(year=year, month=month, day=day)
+        urls = self._generate_warm_up_urls()
 
         async def _open(url: str) -> WarmUpResult:
             try:
@@ -480,6 +475,32 @@ class SportsCenterWebService(ABC):
                     )
 
         return list(results)
+
+    async def fetch_list_page(
+        self, session, year: int, month: int, day: int
+    ) -> str | None:
+        """Fetch the read-only list page, for inspecting slot state.
+
+        Split out from warm-up because this page is slow (4-5 seconds measured)
+        and warm-up sits in a ten-second window. Never raises: an inspection
+        failing must not cost the booking.
+
+        Args:
+            session: the aiohttp session.
+            year (int): target booking year.
+            month (int): target booking month.
+            day (int): target booking day.
+
+        Returns:
+            str | None: the page body, or None if it could not be fetched.
+        """
+        url = self._generate_list_page_url(year=year, month=month, day=day)
+        try:
+            async with session.get(url) as response:
+                return await response.text()
+        except Exception as error:
+            logging.warning("取得場地列表頁失敗：%s", error)
+            return None
 
     async def booking_courts(
         self,
@@ -601,19 +622,46 @@ class SportsCenterWebService(ABC):
 
         return SLOT_UNKNOWN
 
-    def _generate_warm_up_urls(
-        self, year: int, month: int, day: int
-    ) -> tuple[str, ...]:
-        """Two read-only pages to open concurrently, leaving two hot connections.
+    def parse_available_courts(self, html: str, hour: int) -> list[int]:
+        """Every court id still bookable at this hour, read off the list page.
 
-        Two connections because the two booking requests each need one. Two
-        *different* pages because a browser loading a page in parallel is
-        ordinary traffic, whereas the same URL fetched twice at once is not.
+        Deliberately data-driven rather than checked against a hardcoded court
+        table: only two court ids on this platform were ever confirmed, and the
+        question this answers — how many courts survived the opening instant —
+        is exactly the one a stale table would get wrong.
+
+        An empty list means the hour was swept clean, which is what a real
+        millisecond race looks like. Several courts still free means the race
+        was not lost on timing at all.
+
+        Args:
+            html (str): the list page body.
+            hour (int): the hour to inspect.
 
         Returns:
-            tuple[str, ...]: the list page and the login page.
+            list[int]: bookable court ids, sorted and deduplicated.
         """
-        return (
-            self._generate_list_page_url(year=year, month=month, day=day),
-            type(self).login_page_url,
-        )
+        bookable = re.compile(rf"Step3Action\(\s*(\d+)\s*,\s*0?{hour}\s*\)")
+
+        return sorted({int(qpid) for qpid in bookable.findall(html)})
+
+    @abstractmethod
+    def _static_asset_urls(self) -> tuple[str, str]:
+        """兩個靜態資源網址，用來預熱連線。由 Cloudflare 邊緣直接回，不碰應用伺服器。"""
+
+    def _generate_warm_up_urls(self) -> tuple[str, ...]:
+        """Two URLs to open concurrently, leaving two hot connections behind.
+
+        Two connections because the two booking requests each need one. Two
+        *different* URLs because a browser loading a page in parallel is
+        ordinary traffic, whereas the same URL fetched twice at once is not.
+
+        Static assets rather than the list page: warming up needs the
+        connection, not the content, and the list page was measured taking
+        4-5 seconds — from T-10s that finished at T-4.6s, almost overrunning
+        its budget. An edge-served asset answers in tens of milliseconds.
+
+        Returns:
+            tuple[str, ...]: two static asset URLs.
+        """
+        return self._static_asset_urls()

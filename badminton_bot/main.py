@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 import time
 from datetime import datetime, timedelta
 
@@ -17,7 +18,6 @@ from badminton_bot.utils.input_helper import (
     check_if_target_datetime_is_outdated,
     get_valid_input,
     parse_input_booking_periods_str,
-    transform_offset_milliseconds_param,
     transform_yes_no_input,
 )
 from badminton_bot.utils.ntp_client import query_clock_offset
@@ -31,6 +31,9 @@ from badminton_bot.utils.timing import (
     plan_send_time,
     sleep_then_spin,
 )
+
+# 每次執行的 log 都留一份，之後才有辦法回頭看實際搶場地當下發生了什麼
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 
 BOOKING_WEEKDAY = 4  # 填上星期幾搶場地
 UPCOMING_BOOKING_DATE = (
@@ -48,11 +51,21 @@ LOGIN_OFFSET = timedelta(minutes=-3)
 # 時鐘探測的截止時刻。探測從登入完成後就開始，填滿原本閒置的那段時間
 PROBE_DEADLINE_OFFSET = timedelta(seconds=-30)
 
-# 預熱時機。夠做完預熱，又短到 keep-alive 一定守得住
+# 開放前查看場地狀態的時機。列表頁要 4~5 秒，所以不能擠在最後十秒裡
+PRE_CHECK_OFFSET = timedelta(seconds=-40)
+
+# 重新校時的時機。實測本機時鐘十幾分鐘就能漂 1.3 秒，
+# 確認畫面當下量的值到了開搶那一刻早就過期了
+NTP_REFRESH_OFFSET = timedelta(seconds=-20)
+
+# 預熱時機。抓的是靜態資源，很快就做完
 WARM_UP_OFFSET = timedelta(seconds=-10)
 
 # 搶完之後隔多久回頭看一次最終狀態
 POST_CHECK_DELAY_SECONDS = 2.0
+
+# 列表頁實測要 4~5 秒，預算給寬一點；逾時只是少一筆偵察資料，不影響搶場地
+LIST_PAGE_BUDGET_SECONDS = 12.0
 
 # 預熱的時間預算。預熱本身約 200 毫秒，而它整個位在 T-10 秒的窗口裡，
 # 留 6 秒已經很寬鬆，超過就代表出事了，寧可冷連線也不要拖掉開搶。
@@ -61,6 +74,35 @@ WARM_UP_BUDGET_SECONDS = 6.0
 # 最後這麼久才進 busy-wait。忙碌等待期間 event loop 完全停擺，
 # 伺服器送來的 FIN 不會被處理，死掉的連線就會留在連線池裡等著被用。
 FINAL_SPIN_SECONDS = 0.3
+
+
+def report_slot_states(service, html: str | None, booking_periods, label: str) -> None:
+    """Log the target court's state and how many courts survived, at one instant.
+
+    The court census is the more informative half. `X=2` cannot tell "someone
+    beat me by 20 milliseconds" apart from "this hour was swept clean", and
+    that answer decides whether shaving milliseconds is worth anything at all.
+
+    Args:
+        service: the sports centre web service.
+        html (str | None): the list page body, or None if it could not be read.
+        booking_periods: the datetimes being booked.
+        label (str): "開放前" or "開放後", for the log line.
+    """
+    if html is None:
+        logging.warning("%s無法取得場地列表頁，略過狀態檢查", label)
+        return
+
+    for booking_date in booking_periods:
+        available = service.parse_available_courts(html, hour=booking_date.hour)
+        logging.info(
+            "%s %d 點：目標場地 %s｜該時段還空著 %d 片%s",
+            label,
+            booking_date.hour,
+            service.parse_slot_state(html, hour=booking_date.hour),
+            len(available),
+            f"（{available}）" if available else "",
+        )
 
 
 async def run_with_deadline(awaitable, budget_seconds: float, label: str, fallback):
@@ -227,7 +269,9 @@ def report_attempts(
 
 async def main():
     """搶球場主程式的進入點，倒數計時後搶球場"""
-    set_logger()
+    log_path = set_logger()
+
+    logging.info("本次執行的 log 會留在 %s", log_path)
 
     courts_list_message = ""
     for court_no, court_service in WEBSERVICE_MAPPING.items():
@@ -269,19 +313,8 @@ async def main():
             error_hint="輸入日期不正確，請重新輸入",
         )
     else:
-        offset_milliseconds = get_valid_input(
-            prompt=(
-                "請輸入想要偏移的毫秒數(輸入範圍為 -1000 ~ 1000，"
-                "想要提早就輸入負整數，延後就輸入正整數，不想要偏移就不輸入)："
-            ),
-            transform_func=lambda x: transform_offset_milliseconds_param(
-                input_milliseconds_param=x
-            ),
-            error_hint="輸入的偏移豪秒數不正確，請重新輸入",
-        )
-        upcoming_booking_date = UPCOMING_BOOKING_DATE + timedelta(
-            milliseconds=offset_milliseconds
-        )
+        # 時鐘校正已經自動化，不再需要人工猜一個毫秒偏移
+        upcoming_booking_date = UPCOMING_BOOKING_DATE
         booking_periods = (
             (
                 UPCOMING_BOOKING_DATE + timedelta(days=webservice.booking_window_days)
@@ -312,13 +345,7 @@ async def main():
     # dev 模式一樣校時：它是一次完整彩排，跳過校時就驗證不到送出時刻的補償。
     theta_ntp = query_clock_offset()
 
-    # 送出時刻的計算基準，非開發模式下已經含使用者的手動毫秒偏移
-    # （所以 plan_send_time 的 manual_offset_ms 才傳 0，不能重複套用）。
     nominal_epoch = upcoming_booking_date.timestamp()
-
-    # 儀表的基準則要用「沒被手動偏移動過」的名目開放時刻，
-    # 否則輸入 +200 的人會看到 +0.0 毫秒，等於量不到自己調了什麼。
-    reference_epoch = nominal_epoch if dev_mode else UPCOMING_BOOKING_DATE.timestamp()
     booking_target = booking_periods[0]
 
     # 倒數至開搶前的登入時間，太早登入有 session 過期的風險
@@ -375,31 +402,52 @@ async def main():
                     (measurement.theta - theta_ntp) * 1000,
                 )
 
+            # 開放前查看場地狀態。列表頁要 4~5 秒，所以提前到 T-40s 單獨做，
+            # 不跟預熱擠在最後十秒。只記錄，不對結果做任何分支。
+            count_down(booking_date=upcoming_booking_date, offset=PRE_CHECK_OFFSET)
+            report_slot_states(
+                service=service,
+                html=await run_with_deadline(
+                    service.fetch_list_page(
+                        session=session,
+                        year=booking_target.year,
+                        month=booking_target.month,
+                        day=booking_target.day,
+                    ),
+                    budget_seconds=LIST_PAGE_BUDGET_SECONDS,
+                    label="開放前場地檢查",
+                    fallback=None,
+                ),
+                booking_periods=booking_periods,
+                label="開放前",
+            )
+
+            # 重新校時。確認畫面當下量的值可能已經是十幾分鐘前的事，
+            # 而實測這台機器十幾分鐘就能漂 1.3 秒。
+            count_down(booking_date=upcoming_booking_date, offset=NTP_REFRESH_OFFSET)
+            refreshed_theta_ntp = query_clock_offset()
+            if refreshed_theta_ntp is not None and theta_ntp is not None:
+                logging.info(
+                    "本機時鐘在這段期間漂移了 %.1f 毫秒",
+                    (refreshed_theta_ntp - theta_ntp) * 1000,
+                )
+            if refreshed_theta_ntp is not None:
+                theta_ntp = refreshed_theta_ntp
+
+            if theta_ntp is None:
+                logging.warning(
+                    "NTP 校時失敗，本次完全不做時鐘校正 —— "
+                    "送出時刻的準確度取決於本機時鐘，且已無手動偏移可介入"
+                )
+
             # 倒數至預熱時機
             count_down(booking_date=upcoming_booking_date, offset=WARM_UP_OFFSET)
             warm_up_results = await run_with_deadline(
-                service.warm_up(
-                    session=session,
-                    year=booking_target.year,
-                    month=booking_target.month,
-                    day=booking_target.day,
-                ),
+                service.warm_up(session=session),
                 budget_seconds=WARM_UP_BUDGET_SECONDS,
                 label="連線預熱",
                 fallback=[],
             )
-
-            # 前提驗證：那格在開放前就已經不是可訂狀態的話，所有優化的收益是零。
-            # 只記錄，不對結果做任何分支。
-            if warm_up_results and warm_up_results[0].body:
-                for booking_date in booking_periods:
-                    logging.info(
-                        "開放前 %d 點的目標場地狀態：%s",
-                        booking_date.hour,
-                        service.parse_slot_state(
-                            warm_up_results[0].body, hour=booking_date.hour
-                        ),
-                    )
 
             # 補償用的是握手量到的飛行時間，不是回應時間 —— 這個站的回應時間
             # 幾乎都是伺服器處理，拿它的一半去補償會把請求提早好幾秒送出。
@@ -426,7 +474,7 @@ async def main():
                 )
             logging.info(
                 "送出時刻相對名目開放時刻 %+.1f 毫秒（來源：%s）",
-                (send_at_epoch - reference_epoch) * 1000,
+                (send_at_epoch - nominal_epoch) * 1000,
                 source,
             )
 
@@ -437,38 +485,64 @@ async def main():
                 send_at_epoch=send_at_epoch,
             )
             report_attempts(
-                attempts=attempts, reference_epoch=reference_epoch, source=source
+                attempts=attempts, reference_epoch=nominal_epoch, source=source
             )
 
             # 事後偵察：這是「輸幾毫秒」與「根本沒開放給你」之間唯一的判別依據
             await asyncio.sleep(POST_CHECK_DELAY_SECONDS)
-            try:
-                async with session.get(referer) as response:
-                    body = await response.text()
-                for booking_date in booking_periods:
-                    logging.info(
-                        "開放後 %d 點的目標場地狀態：%s",
-                        booking_date.hour,
-                        service.parse_slot_state(body, hour=booking_date.hour),
-                    )
-            except Exception as error:
-                logging.warning("事後偵察失敗：%s", error)
+            report_slot_states(
+                service=service,
+                html=await run_with_deadline(
+                    service.fetch_list_page(
+                        session=session,
+                        year=booking_target.year,
+                        month=booking_target.month,
+                        day=booking_target.day,
+                    ),
+                    budget_seconds=LIST_PAGE_BUDGET_SECONDS,
+                    label="事後偵察",
+                    fallback=None,
+                ),
+                booking_periods=booking_periods,
+                label="開放後",
+            )
 
 
-def set_logger(debug_mode: bool = False) -> None:
-    """set logging settings
+def set_logger(log_dir: Path = LOG_DIR, debug_mode: bool = False) -> Path:
+    """Send log records to the terminal and to a timestamped file.
+
+    The file is written through logging rather than by redirecting the shell,
+    and that is a safety property rather than a style choice: input() prompts
+    never pass through logging, so the confirmation screen's credentials cannot
+    reach the file. Shell redirection offers no such guarantee.
 
     Args:
-        debug_mode (bool, optional): set log level to debug with debug_mode is True. Defaults to False.
-    """
-    if debug_mode:
-        log_level = logging.DEBUG
-    else:
-        log_level = logging.INFO
+        log_dir (Path, optional): directory for log files. Created if missing.
+        debug_mode (bool, optional): log at DEBUG instead of INFO.
 
-    logging.basicConfig(
-        level=log_level, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
+    Returns:
+        Path: the file this run is logging to.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{datetime.now().strftime('%Y-%m-%dT%H%M%S')}.log"
+
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG if debug_mode else logging.INFO)
+
+    # 重複呼叫不該疊加 handler，否則同一行會被印很多次
+    for existing in list(root_logger.handlers):
+        root_logger.removeHandler(existing)
+        existing.close()
+
+    for handler in (
+        logging.StreamHandler(),
+        logging.FileHandler(log_path, encoding="utf-8"),
+    ):
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+
+    return log_path
 
 
 def count_down(booking_date: datetime, offset: timedelta = timedelta()) -> None:
