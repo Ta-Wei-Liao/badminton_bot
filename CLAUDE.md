@@ -59,15 +59,18 @@ This split is the core design and the reason for everything else.
 
 - `BOOKING_WEEKDAY = 4` (module constant, ISO weekday — Mon=1) determines which upcoming weekday's midnight is the target. Changing the grab day means editing this constant.
 - `count_down(booking_date, offset=timedelta(minutes=-3))` blocks until **3 minutes before** the target, and only *then* does Selenium log in — logging in earlier risks session expiry.
-- A second `count_down()` blocks to the exact target instant, then the requests go out.
-- `count_down` is a deliberate busy-wait loop polling `datetime.now()`, not `sleep` — it needs millisecond precision.
-- The offset prompt (`-1000`..`1000` ms) lets the user fire slightly early or late relative to the server clock.
+- Between login and the deadline the program measures the booking server's own clock by binary-searching its `Date` header (~8 read-only probes at random 12–25s gaps), warms two connections at T−10s, then fires.
+- `count_down` sleeps coarsely while far from its target and busy-waits only inside the last few seconds — it needs millisecond precision at the instant, but pegging a core for three minutes beforehand is not free.
+- The send instant is computed, not assumed: `nominal + θ − rtt_median/2 + margin`, where `θ` is the measured local-minus-server offset (falling back to NTP, then to zero) and `margin` deliberately biases late. Firing early is a hard failure — the server rejects a slot that has not opened — while firing late merely risks losing the race.
+- The offset prompt (`-1000`..`1000` ms) is now a manual fine-adjustment **on top of** that automatic correction; leaving it blank is the normal case. Reach for it only when the instrumentation shows a consistent residual bias, or when the log says the automatic correction was clamped or unavailable.
 
-**Dev mode** (`Y` at the "開發測試模式" prompt) skips the derived schedule and lets you type an arbitrary open time and arbitrary booking periods, so you can exercise the flow without waiting for the real window. It still hits the live site — see the live-site constraint above.
+**Dev mode** (`Y` at the "開發測試模式" prompt) skips the derived schedule and lets you type an arbitrary open time and arbitrary booking periods, so you can exercise the flow without waiting for the real window. Everything else — NTP sync, the server-clock probes, warm-up, and the post-booking reconnaissance — runs exactly as it does for a real grab, so dev mode is a full rehearsal rather than a partial one.
+
+That makes it **expensive and not something to run casually**: each dev run sends roughly 11 extra requests to the live site on top of login, and the booking GETs are the real `StepFlag=25` ones, so an available slot really will be reserved. Give the open time at least 4 minutes of runway — the clock probes need ~2.5 minutes between T−3min and T−30s to converge; a shorter window degrades to no measurement rather than failing. See the live-site constraint above.
 
 ### Adding a sports center
 
-`SportsCenterWebService` (`badminton_bot/services/sports_center_webservice.py`) is an ABC that holds all shared flow — login, logout, cookie extraction, `booking_courts()`. Its `__init_subclass__` **enforces at class-definition time** that every subclass declares three class attributes: `sport_center_name`, `login_page_url`, `booking_window_days`. Missing one raises `TypeError` on import, not at runtime.
+`SportsCenterWebService` (`badminton_bot/services/sports_center_webservice.py`) is an ABC that holds all shared flow — login, logout, cookie extraction, `booking_courts()`. Its `__init_subclass__` **enforces at class-definition time** that every subclass declares four class attributes: `sport_center_name`, `login_page_url`, `booking_window_days`, `target_qpid`. Missing one raises `TypeError` on import, not at runtime.
 
 Subclasses supply only site-specific selectors and URL construction via the abstract hooks (`_find_username_input_box_element`, `_generate_booking_url`, `_is_booking_success`, etc.).
 
@@ -79,7 +82,7 @@ To add a center: create a subclass in `badminton_bot/services/`, then register i
 
 Zhongshan (`scr.cyc.org.tw/tp01.aspx`) and Zhongzheng (`bwd.xuanen.com.tw/wd27.aspx`) run the same ASP.NET booking software, so both subclasses share identical element IDs (`ContentPlaceHolder1_loginid`, `loginpw`, `lab_Name`, `showerror3`), the same `DoSubmit()` login call, and the same success check — the response body contains `PT=1&X=1` on success, `PT=1&X=2` on failure, and anything else raises `RuntimeError`.
 
-The real per-site differences are: host/page path, **`QPid`** (the venue/court id in the booking URL — this is what you change to target a different court), `booking_window_days`, and `QTime` padding (Zhongshan zero-pads the hour, Zhongzheng does not). When adding a third center on this platform, expect to copy an existing subclass and change little more than those.
+The real per-site differences are: host/page path, **`target_qpid`** (the venue/court id — a class attribute now, so changing which court you target is a one-line edit), `booking_window_days`, and `QTime` padding (Zhongshan zero-pads the hour, Zhongzheng does not). When adding a third center on this platform, expect to copy an existing subclass and change little more than those.
 
 ### Import layout
 

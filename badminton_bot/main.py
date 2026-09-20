@@ -301,9 +301,8 @@ async def main():
     else:
         logging.info("預約資訊已確認，繼續執行程式")
 
-    # 非開發模式才校時。dev mode 打的仍是真實網站，每次測試都跑完整流程
-    # 等於在非開搶時段多送十幾個請求，違反 live-site constraint。
-    theta_ntp = None if dev_mode else query_clock_offset()
+    # dev 模式一樣校時：它是一次完整彩排，跳過校時就驗證不到送出時刻的補償。
+    theta_ntp = query_clock_offset()
 
     # 送出時刻的計算基準，非開發模式下已經含使用者的手動毫秒偏移
     # （所以 plan_send_time 的 manual_offset_ms 才傳 0，不能重複套用）。
@@ -330,42 +329,40 @@ async def main():
         )
 
         async with service.create_session(cookies=cookies, referer=referer) as session:
-            measurement = ClockMeasurement(theta=None, uncertainty=0.0)
-            if not dev_mode:
-                probe_deadline_epoch = (
-                    upcoming_booking_date + PROBE_DEADLINE_OFFSET
-                ).timestamp()
-                measurement = await run_with_deadline(
-                    measure_server_clock(
-                        session=session,
-                        url=referer,
-                        deadline_epoch=probe_deadline_epoch,
-                    ),
-                    budget_seconds=probe_deadline_epoch - time.time(),
-                    label="伺服器時鐘探測",
-                    fallback=ClockMeasurement(theta=None, uncertainty=0.0),
-                )
+            probe_deadline_epoch = (
+                upcoming_booking_date + PROBE_DEADLINE_OFFSET
+            ).timestamp()
+            measurement = await run_with_deadline(
+                measure_server_clock(
+                    session=session,
+                    url=referer,
+                    deadline_epoch=probe_deadline_epoch,
+                ),
+                budget_seconds=probe_deadline_epoch - time.time(),
+                label="伺服器時鐘探測",
+                fallback=ClockMeasurement(theta=None, uncertainty=0.0),
+            )
+            logging.info(
+                "伺服器校時：θ=%s 不確定度=±%.1f 毫秒 探測 %d 次 捨棄 %d 次",
+                f"{measurement.theta * 1000:+.1f} 毫秒"
+                if measurement.theta is not None
+                else "量測失敗",
+                measurement.uncertainty * 1000,
+                measurement.probe_count,
+                measurement.discarded_count,
+            )
+            if measurement.rtt_samples:
                 logging.info(
-                    "伺服器校時：θ=%s 不確定度=±%.1f 毫秒 探測 %d 次 捨棄 %d 次",
-                    f"{measurement.theta * 1000:+.1f} 毫秒"
-                    if measurement.theta is not None
-                    else "量測失敗",
-                    measurement.uncertainty * 1000,
-                    measurement.probe_count,
-                    measurement.discarded_count,
+                    "探測 RTT：min %.1f／median %.1f／max %.1f 毫秒",
+                    min(measurement.rtt_samples) * 1000,
+                    measurement.rtt_median * 1000,
+                    max(measurement.rtt_samples) * 1000,
                 )
-                if measurement.rtt_samples:
-                    logging.info(
-                        "探測 RTT：min %.1f／median %.1f／max %.1f 毫秒",
-                        min(measurement.rtt_samples) * 1000,
-                        measurement.rtt_median * 1000,
-                        max(measurement.rtt_samples) * 1000,
-                    )
-                if measurement.theta is not None and theta_ntp is not None:
-                    logging.info(
-                        "與 NTP 的差距 %.1f 毫秒（接近代表伺服器有做 NTP，可信度高）",
-                        (measurement.theta - theta_ntp) * 1000,
-                    )
+            if measurement.theta is not None and theta_ntp is not None:
+                logging.info(
+                    "與 NTP 的差距 %.1f 毫秒（接近代表伺服器有做 NTP，可信度高）",
+                    (measurement.theta - theta_ntp) * 1000,
+                )
 
             # 倒數至預熱時機
             count_down(booking_date=upcoming_booking_date, offset=WARM_UP_OFFSET)
@@ -423,19 +420,18 @@ async def main():
             )
 
             # 事後偵察：這是「輸幾毫秒」與「根本沒開放給你」之間唯一的判別依據
-            if not dev_mode:
-                await asyncio.sleep(POST_CHECK_DELAY_SECONDS)
-                try:
-                    async with session.get(referer) as response:
-                        body = await response.text()
-                    for booking_date in booking_periods:
-                        logging.info(
-                            "開放後 %d 點的目標場地狀態：%s",
-                            booking_date.hour,
-                            service.parse_slot_state(body, hour=booking_date.hour),
-                        )
-                except Exception as error:
-                    logging.warning("事後偵察失敗：%s", error)
+            await asyncio.sleep(POST_CHECK_DELAY_SECONDS)
+            try:
+                async with session.get(referer) as response:
+                    body = await response.text()
+                for booking_date in booking_periods:
+                    logging.info(
+                        "開放後 %d 點的目標場地狀態：%s",
+                        booking_date.hour,
+                        service.parse_slot_state(body, hour=booking_date.hour),
+                    )
+            except Exception as error:
+                logging.warning("事後偵察失敗：%s", error)
 
 
 def set_logger(debug_mode: bool = False) -> None:
