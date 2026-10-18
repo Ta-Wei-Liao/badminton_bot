@@ -459,7 +459,7 @@ class SportsCenterWebService(ABC):
                         keep_alive=response.headers.get("Keep-Alive"),
                     )
             except Exception as error:
-                logging.warning("預熱請求失敗（%s）：%s", url, error)
+                logging.warning("預熱請求失敗（%s）：%r", url, error)
                 return WarmUpResult(url=url, ok=False)
 
         results = await asyncio.gather(*(_open(url) for url in urls))
@@ -479,7 +479,7 @@ class SportsCenterWebService(ABC):
         return list(results)
 
     async def fetch_list_page(
-        self, session, year: int, month: int, day: int
+        self, session, year: int, month: int, day: int, timeout_seconds: float
     ) -> str | None:
         """Fetch the read-only list page, for inspecting slot state.
 
@@ -492,16 +492,22 @@ class SportsCenterWebService(ABC):
             year (int): target booking year.
             month (int): target booking month.
             day (int): target booking day.
+            timeout_seconds (float): this request's own limit. The session-wide
+                five seconds is shorter than the page itself takes, so relying
+                on it guarantees a timeout.
 
         Returns:
             str | None: the page body, or None if it could not be fetched.
         """
         url = self._generate_list_page_url(year=year, month=month, day=day)
         try:
-            async with session.get(url) as response:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout_seconds)
+            ) as response:
                 return await response.text()
         except Exception as error:
-            logging.warning("取得場地列表頁失敗：%s", error)
+            # 用 %r：asyncio.TimeoutError 的 str() 是空字串
+            logging.warning("取得場地列表頁失敗：%r", error)
             return None
 
     async def booking_courts(
@@ -542,7 +548,7 @@ class SportsCenterWebService(ABC):
                 rtt = time.perf_counter() - started
                 server_date = response.headers.get("Date")
         except Exception as error:
-            logging.error("%d 點的場地請求失敗：%s", hour, error)
+            logging.error("%d 點的場地請求失敗：%r", hour, error)
             return BookingAttempt(
                 hour=hour,
                 url=booking_url,
@@ -550,7 +556,7 @@ class SportsCenterWebService(ABC):
                 rtt=time.perf_counter() - started,
                 server_date=None,
                 success=None,
-                error=str(error),
+                error=repr(error),
             )
 
         try:

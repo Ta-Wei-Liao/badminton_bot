@@ -59,7 +59,7 @@ This split is the core design and the reason for everything else.
 
 - `BOOKING_WEEKDAY = 4` (module constant, ISO weekday — Mon=1) determines which upcoming weekday's midnight is the target. Changing the grab day means editing this constant.
 - `count_down(booking_date, offset=timedelta(minutes=-3))` blocks until **3 minutes before** the target, and only *then* does Selenium log in — logging in earlier risks session expiry.
-- Between login and the deadline the program measures the booking server's own clock by binary-searching its `Date` header (~8 read-only probes at random 12–25s gaps), warms two connections at T−10s, then fires.
+- Between login and the deadline the program measures the booking server's own clock by binary-searching its `Date` header (~8 read-only probes at random 12–25s gaps), warms two connections at T−10s, then fires. On Zhongzheng the probe target (the list page) takes 5+ seconds, so the first probe already proves the search cannot converge and it falls back to NTP after one request; a probe that fails slowly counts too, since the time waited is a lower bound on RTT. Static assets are no way round this: they are served by Cloudflare, whose `Date` is just NTP again.
 - `count_down` sleeps coarsely while far from its target and busy-waits only inside the last few seconds — it needs millisecond precision at the instant, but pegging a core for three minutes beforehand is not free.
 - The send instant is computed, not assumed: `nominal + θ − rtt_median/2 + margin`, where `θ` is the measured local-minus-server offset (falling back to NTP, then to zero) and `margin` deliberately biases late. Firing early is a hard failure — the server rejects a slot that has not opened — while firing late merely risks losing the race.
 - There is no manual offset prompt any more; clock correction is entirely automatic. That also means there is no human escape hatch: if NTP fails the program fires on an uncorrected clock and says so loudly in the log.
@@ -68,7 +68,7 @@ This split is the core design and the reason for everything else.
 
 **Dev mode** (`Y` at the "開發測試模式" prompt) skips the derived schedule and lets you type an arbitrary open time and arbitrary booking periods, so you can exercise the flow without waiting for the real window. Everything else — NTP sync, the server-clock probes, warm-up, and the post-booking reconnaissance — runs exactly as it does for a real grab, so dev mode is a full rehearsal rather than a partial one.
 
-That makes it **expensive and not something to run casually**: each dev run sends roughly 11 extra requests to the live site on top of login, and the booking GETs are the real `StepFlag=25` ones, so an available slot really will be reserved. Give the open time at least 4 minutes of runway — the clock probes need ~2.5 minutes between T−3min and T−30s to converge; a shorter window degrades to no measurement rather than failing. See the live-site constraint above.
+That makes it **expensive and not something to run casually**: each dev run sends extra requests to the live site on top of login (on Zhongzheng about 5: one clock probe, two list-page checks, two warm-ups), and the booking GETs are the real `StepFlag=25` ones, so an available slot really will be reserved. Give the open time at least 4 minutes of runway — the clock probes need ~2.5 minutes between T−3min and T−30s to converge; a shorter window degrades to no measurement rather than failing. See the live-site constraint above.
 
 ### Adding a sports center
 
