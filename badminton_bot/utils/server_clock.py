@@ -288,9 +288,28 @@ async def measure_server_clock(
                 t3 = time.time()
                 headers = response.headers
         except Exception as error:
-            logging.warning("時鐘探測請求失敗：%s", error)
+            # 用 %r：asyncio.TimeoutError 的 str() 是空字串，log 只會剩一個冒號
+            logging.warning("時鐘探測請求失敗：%r", error)
             discarded_count += 1
             probe_count += 1
+
+            # 失敗前等了多久就是 RTT 的下限。實測列表頁每一發都在 5 秒逾時，
+            # 一個 RTT 樣本都拿不到，可行性判斷永遠不會觸發，每週白送五個請求。
+            elapsed = time.time() - t0
+            if elapsed / 2 > MAX_USEFUL_UNCERTAINTY_SECONDS:
+                logging.warning(
+                    "探測等了 %.0f 毫秒才失敗，不確定度下限已超過採用門檻 ±%.0f 毫秒，"
+                    "再探測也不可能收斂，放棄伺服器校時",
+                    elapsed * 1000,
+                    MAX_USEFUL_UNCERTAINTY_SECONDS * 1000,
+                )
+                return ClockMeasurement(
+                    theta=None,
+                    uncertainty=0.0,
+                    rtt_samples=rtt_samples,
+                    probe_count=probe_count,
+                    discarded_count=discarded_count,
+                )
             continue
 
         probe_count += 1

@@ -9,6 +9,11 @@ from datetime import datetime, timedelta
 import pytest
 
 from badminton_bot.main import (
+    NTP_REFRESH_OFFSET,
+    POST_CHECK_DELAY_SECONDS,
+    POST_CHECK_TIMEOUT_SECONDS,
+    PRE_CHECK_OFFSET,
+    PRE_CHECK_TIMEOUT_SECONDS,
     WEBSERVICE_MAPPING,
     count_down,
     run_booking_race,
@@ -333,3 +338,25 @@ class TestReportSlotStatesDistinguishesNotYetOpen:
 
         assert "還空著 2 片" in caplog.text
         assert "1196" in caplog.text
+
+
+class TestListPageTimeouts:
+    def test_the_pre_check_finishes_before_the_ntp_refresh(self):
+        """開放前偵察最慢也要在重新校時之前結束，否則會把後面的排程往後推。"""
+        assert (
+            PRE_CHECK_OFFSET + timedelta(seconds=PRE_CHECK_TIMEOUT_SECONDS)
+            < NTP_REFRESH_OFFSET
+        )
+
+    def test_both_checks_outlast_the_session_timeout(self):
+        """列表頁實測超過 5 秒；沿用 session 上限的話偵察注定逾時。"""
+        from badminton_bot.services.sports_center_webservice import (
+            SESSION_TIMEOUT_SECONDS,
+        )
+
+        assert PRE_CHECK_TIMEOUT_SECONDS > SESSION_TIMEOUT_SECONDS
+        assert POST_CHECK_TIMEOUT_SECONDS > SESSION_TIMEOUT_SECONDS
+
+    def test_the_post_check_waits_out_the_rush(self):
+        """開搶當下實測回應要 5~27 秒；T+2s 去抓列表頁四週全數逾時。"""
+        assert POST_CHECK_DELAY_SECONDS >= 30.0

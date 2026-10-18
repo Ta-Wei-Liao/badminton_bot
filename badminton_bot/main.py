@@ -65,11 +65,19 @@ NTP_REFRESH_OFFSET = timedelta(seconds=-20)
 # 預熱時機。抓的是靜態資源，很快就做完
 WARM_UP_OFFSET = timedelta(seconds=-10)
 
-# 搶完之後隔多久回頭看一次最終狀態
-POST_CHECK_DELAY_SECONDS = 2.0
+# 搶完之後隔多久回頭看一次最終狀態。偵察要的是最終誰搶到，不必搶在尖峰裡看：
+# 實測開搶當下伺服器回應要 5~27 秒（甚至 30 秒逾時），等尖峰退了再抓，請求數不變
+POST_CHECK_DELAY_SECONDS = 45.0
 
-# 列表頁實測要 4~5 秒，預算給寬一點；逾時只是少一筆偵察資料，不影響搶場地
-LIST_PAGE_BUDGET_SECONDS = 12.0
+# 列表頁的請求上限。實測開搶前就要 5 秒以上，原本沿用 session 的 5 秒上限，
+# 四週的開放前／後偵察全數逾時。逾時只是少一筆偵察資料，不影響搶場地。
+# 開放前那一發從 T-40s 開始，15 秒內結束才不會拖到 T-20s 的重新校時
+PRE_CHECK_TIMEOUT_SECONDS = 15.0
+# 開放後伺服器正被擠爆，搶場地的請求實測要 5~27 秒才回，給足時間
+POST_CHECK_TIMEOUT_SECONDS = 30.0
+
+# run_with_deadline 比請求本身的上限多留一點，讓請求自己的逾時先觸發、留下 log
+LIST_PAGE_DEADLINE_SLACK_SECONDS = 1.0
 
 # 預熱的時間預算。預熱本身約 200 毫秒，而它整個位在 T-10 秒的窗口裡，
 # 留 6 秒已經很寬鬆，超過就代表出事了，寧可冷連線也不要拖掉開搶。
@@ -430,8 +438,10 @@ async def main():
                         year=booking_target.year,
                         month=booking_target.month,
                         day=booking_target.day,
+                        timeout_seconds=PRE_CHECK_TIMEOUT_SECONDS,
                     ),
-                    budget_seconds=LIST_PAGE_BUDGET_SECONDS,
+                    budget_seconds=PRE_CHECK_TIMEOUT_SECONDS
+                    + LIST_PAGE_DEADLINE_SLACK_SECONDS,
                     label="開放前場地檢查",
                     fallback=None,
                 ),
@@ -515,8 +525,10 @@ async def main():
                         year=booking_target.year,
                         month=booking_target.month,
                         day=booking_target.day,
+                        timeout_seconds=POST_CHECK_TIMEOUT_SECONDS,
                     ),
-                    budget_seconds=LIST_PAGE_BUDGET_SECONDS,
+                    budget_seconds=POST_CHECK_TIMEOUT_SECONDS
+                    + LIST_PAGE_DEADLINE_SLACK_SECONDS,
                     label="事後偵察",
                     fallback=None,
                 ),

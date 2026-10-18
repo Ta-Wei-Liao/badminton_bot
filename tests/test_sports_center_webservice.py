@@ -633,7 +633,9 @@ class TestWarmUp:
         session = RecordingSession(body=LIST_PAGE_HTML)
 
         body = asyncio.run(
-            service.fetch_list_page(session=session, year=2026, month=9, day=17)
+            service.fetch_list_page(
+                session=session, year=2026, month=9, day=17, timeout_seconds=15.0
+            )
         )
         assert body == LIST_PAGE_HTML
         assert "StepFlag=2&" in session.requested_urls[0]
@@ -646,7 +648,11 @@ class TestWarmUp:
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         body = asyncio.run(
             service.fetch_list_page(
-                session=ExplodingSession(), year=2026, month=9, day=17
+                session=ExplodingSession(),
+                year=2026,
+                month=9,
+                day=17,
+                timeout_seconds=15.0,
             )
         )
         assert body is None
@@ -856,3 +862,46 @@ class TestWarmUpReadsBinaryAssets:
         assert all(result.ok for result in results)
         assert all(result.connection == "keep-alive" for result in results)
         assert len(session.requested_urls) == 2
+
+
+class TestListPageTimeout:
+    """列表頁實測要 5 秒以上，session 的 5 秒上限讓開放前後的偵察四週全數失敗。"""
+
+    def test_the_caller_sets_the_list_page_timeout(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession(body=LIST_PAGE_HTML)
+        captured = {}
+
+        original_get = session.get
+
+        def get(url, **kwargs):
+            captured.update(kwargs)
+            return original_get(url, **kwargs)
+
+        session.get = get
+        asyncio.run(
+            service.fetch_list_page(
+                session=session, year=2026, month=9, day=17, timeout_seconds=27.0
+            )
+        )
+        assert captured["timeout"].total == 27.0
+        assert captured["timeout"].total > SESSION_TIMEOUT_SECONDS
+
+    def test_a_timeout_is_logged_with_its_type(self, caplog):
+        class TimingOutSession:
+            def get(self, url, **kwargs):
+                raise asyncio.TimeoutError()
+
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        with caplog.at_level("WARNING"):
+            body = asyncio.run(
+                service.fetch_list_page(
+                    session=TimingOutSession(),
+                    year=2026,
+                    month=9,
+                    day=17,
+                    timeout_seconds=15.0,
+                )
+            )
+        assert body is None
+        assert "TimeoutError" in caplog.text

@@ -530,3 +530,94 @@ class TestProbingIsAbandonedWhenItCannotPossiblyConverge:
         )
         assert measurement.probe_count > 1
         assert measurement.theta is not None
+
+
+class TimingOutSession:
+    """Stalls past the threshold and then times out, like the real list page did."""
+
+    def __init__(self, stall_seconds: float):
+        self.stall_seconds = stall_seconds
+        self.requested_urls: list[str] = []
+
+    def get(self, url, **kwargs):
+        self.requested_urls.append(url)
+        return TimingOutResponse(self.stall_seconds)
+
+
+class TimingOutResponse:
+    def __init__(self, stall_seconds: float):
+        self.stall_seconds = stall_seconds
+
+    async def __aenter__(self):
+        await asyncio.sleep(self.stall_seconds)
+        raise asyncio.TimeoutError()
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class FastFailingSession:
+    def __init__(self):
+        self.requested_urls: list[str] = []
+
+    def get(self, url, **kwargs):
+        self.requested_urls.append(url)
+        raise OSError("模擬連線中斷")
+
+
+class TestAFailedProbeStillRevealsTheRtt:
+    """實測四週的 log：五次探測全數在 5 秒逾時，一個 RTT 樣本都沒拿到，
+    可行性判斷因此永遠沒機會觸發，每週白送五個請求。
+
+    但等了多久才失敗本身就是 RTT 的下限 —— 逾時那一刻就已經知道收斂不了。
+    """
+
+    def test_a_probe_that_times_out_slowly_abandons_the_measurement(self):
+        session = TimingOutSession(stall_seconds=MAX_PROBEABLE_RTT_SECONDS + 0.2)
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=8,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        assert measurement.probe_count == 1
+        assert len(session.requested_urls) == 1
+
+    def test_a_fast_failure_says_nothing_about_rtt_and_keeps_probing(self):
+        session = FastFailingSession()
+        measurement = asyncio.run(
+            measure_server_clock(
+                session=session,
+                url="https://example.invalid/list",
+                deadline_epoch=__import__("time").time() + 3600,
+                budget=3,
+                rng=random.Random(0),
+                min_gap=0.001,
+                max_gap=0.002,
+            )
+        )
+        assert measurement.theta is None
+        assert len(session.requested_urls) == 3
+
+    def test_the_failure_is_logged_with_its_type(self, caplog):
+        """asyncio.TimeoutError 的 str() 是空字串，log 裡只看得到冒號。"""
+        session = TimingOutSession(stall_seconds=MAX_PROBEABLE_RTT_SECONDS + 0.2)
+        with caplog.at_level("WARNING"):
+            asyncio.run(
+                measure_server_clock(
+                    session=session,
+                    url="https://example.invalid/list",
+                    deadline_epoch=__import__("time").time() + 3600,
+                    budget=8,
+                    rng=random.Random(0),
+                    min_gap=0.001,
+                    max_gap=0.002,
+                )
+            )
+        assert "TimeoutError" in caplog.text
