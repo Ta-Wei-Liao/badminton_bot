@@ -65,8 +65,9 @@ NTP_REFRESH_OFFSET = timedelta(seconds=-20)
 # 預熱時機。抓的是靜態資源，很快就做完
 WARM_UP_OFFSET = timedelta(seconds=-10)
 
-# 搶完之後隔多久回頭看一次最終狀態
-POST_CHECK_DELAY_SECONDS = 2.0
+# 搶完之後隔多久回頭看一次最終狀態。偵察要的是最終誰搶到，不必搶在尖峰裡看：
+# 實測開搶當下伺服器回應要 5~27 秒（甚至 30 秒逾時），等尖峰退了再抓，請求數不變
+POST_CHECK_DELAY_SECONDS = 45.0
 
 # 列表頁的請求上限。實測開搶前就要 5 秒以上，原本沿用 session 的 5 秒上限，
 # 四週的開放前／後偵察全數逾時。逾時只是少一筆偵察資料，不影響搶場地。

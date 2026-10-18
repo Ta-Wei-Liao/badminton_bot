@@ -10,6 +10,7 @@ import pytest
 
 from badminton_bot.main import (
     NTP_REFRESH_OFFSET,
+    POST_CHECK_DELAY_SECONDS,
     POST_CHECK_TIMEOUT_SECONDS,
     PRE_CHECK_OFFSET,
     PRE_CHECK_TIMEOUT_SECONDS,
@@ -355,3 +356,7 @@ class TestListPageTimeouts:
 
         assert PRE_CHECK_TIMEOUT_SECONDS > SESSION_TIMEOUT_SECONDS
         assert POST_CHECK_TIMEOUT_SECONDS > SESSION_TIMEOUT_SECONDS
+
+    def test_the_post_check_waits_out_the_rush(self):
+        """開搶當下實測回應要 5~27 秒；T+2s 去抓列表頁四週全數逾時。"""
+        assert POST_CHECK_DELAY_SECONDS >= 30.0
