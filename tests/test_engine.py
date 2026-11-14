@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from badminton_bot.booking_plan import TAIPEI, BookingTarget
+from badminton_bot.booking_plan import TAIPEI, BookingTarget, GrabMode
 from badminton_bot.engine import (
     CENTER_OPTIONS,
     LoginFailed,
@@ -788,3 +788,72 @@ class TestLogDirFallback:
         from badminton_bot.engine import LOG_FALLBACK_DIRS
 
         assert LOG_FALLBACK_DIRS[-1].parent == Path(tempfile.gettempdir())
+
+
+def make_immediate_config(targets=None):
+    day = (datetime.now(TAIPEI) + timedelta(days=2)).date()
+    return GrabConfig(
+        service_cls=FakeService,
+        username="A123456789",
+        password="s3cret",
+        open_at=None,
+        targets=make_targets(day=day) if targets is None else targets,
+        mode=GrabMode.IMMEDIATE,
+    )
+
+
+class TestImmediateMode:
+    def test_default_mode_is_midnight(self):
+        assert make_config().mode is GrabMode.MIDNIGHT
+
+    def test_fires_at_once_and_logs_out(self, offline_engine):
+        stages: list[str] = []
+        started = time.time()
+        attempts = asyncio.run(
+            GrabRunner(make_immediate_config(), on_stage=stages.append).run()
+        )
+        assert time.time() - started < 2
+        (service,) = FakeService.instances
+        assert len(service.session.booking_urls) == 4
+        assert all(a.success is True for a in attempts)
+        assert service.logged_out
+        assert stages == ["瀏覽器自我檢查", "登入中", "送出中", "已送出，等待回應", "完成"]
+
+    def test_skips_every_timing_and_reconnaissance_step(self, offline_engine, monkeypatch):
+        from badminton_bot import engine
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("立即預約不該呼叫這一步")
+
+        monkeypatch.setattr(engine, "query_clock_offset", forbidden)
+        monkeypatch.setattr(engine, "measure_server_clock", forbidden)
+        monkeypatch.setattr(engine, "count_down", forbidden)
+        monkeypatch.setattr(FakeService, "warm_up", forbidden)
+        monkeypatch.setattr(FakeService, "fetch_list_page", forbidden)
+        asyncio.run(GrabRunner(make_immediate_config()).run())
+        (service,) = FakeService.instances
+        assert len(service.session.booking_urls) == 4
+
+    def test_rejects_a_started_hour(self, offline_engine):
+        today = datetime.now(TAIPEI).date()
+        targets = make_targets(hours=(6,), day=today - timedelta(days=1))
+        with pytest.raises(ValueError):
+            asyncio.run(GrabRunner(make_immediate_config(targets=targets)).run())
+        assert FakeService.instances == []
+
+    def test_cancel_during_login_sends_nothing(self, offline_engine, monkeypatch):
+        runner_box = []
+
+        def slow_login(self):
+            runner_box[0].cancel()
+            self.logged_in = True
+
+        monkeypatch.setattr(FakeService, "login", slow_login)
+        runner = GrabRunner(make_immediate_config())
+        runner_box.append(runner)
+        with pytest.raises(Cancelled):
+            asyncio.run(runner.run())
+        (service,) = FakeService.instances
+        assert service.session.booking_urls == []
+        assert service.logged_out
+        assert runner.fired is False
