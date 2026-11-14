@@ -15,9 +15,13 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      # 第三方 action 用 commit SHA 固定：版本標籤可以被改指向，而這個流程有權寫入 Release，
+      # 套件一旦被入侵就能換掉球友下載的 zip。升級時連同後面的版本註解一起改
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
 
@@ -61,10 +65,22 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist/BadmintonBot -DestinationPath BadmintonBot-Windows.zip
 
+      # 附上檢查碼：有人轉傳 zip 時，可以比對是不是 Release 頁上的那一份
+      - name: Checksum
+        shell: bash
+        run: |
+          for zip in BadmintonBot-*.zip; do
+            if command -v sha256sum >/dev/null; then sha256sum "$zip"; else shasum -a 256 "$zip"; fi > "$zip.sha256"
+            cat "$zip.sha256"
+          done
+
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
-          files: BadmintonBot-*.zip
+          files: |
+            BadmintonBot-*.zip
+            BadmintonBot-*.zip.sha256
           body: |
             使用說明請見 [README](https://github.com/Ta-Wei-Liao/badminton_bot#readme)。
             第一次開啟會被系統擋下（未簽章），README 內有放行步驟。
+            請只從這個頁面下載；別人轉傳的檔案可以用 `.sha256` 檢查碼比對是否相同。
