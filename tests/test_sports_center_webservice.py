@@ -1043,3 +1043,58 @@ class TestCheckBrowser:
         with pytest.raises(BrowserUnavailable):
             check_browser()
         assert driver.quit_calls == 1
+
+
+class _CountingDriver:
+    def __init__(self) -> None:
+        self.quit_calls = 0
+
+    def quit(self) -> None:
+        self.quit_calls += 1
+
+
+class TestContextExitClosesChrome:
+    """取消或出錯時也要馬上關掉 Chrome，而不是等垃圾回收。"""
+
+    @staticmethod
+    def _service(driver):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        service._driver = driver
+        # 跳過 __init__ 就沒有登入旗標；設成未登入，logout() 只會記一行 log
+        service._SportsCenterWebService__is_login = False
+        service.login = lambda: None
+        return service
+
+    def test_quits_the_driver_once_after_the_with_block(self):
+        driver = _CountingDriver()
+        service = self._service(driver)
+
+        with service:
+            assert driver.quit_calls == 0
+
+        assert driver.quit_calls == 1
+        service.__del__()
+        assert driver.quit_calls == 1
+
+    def test_quits_the_driver_once_when_the_body_raises(self):
+        driver = _CountingDriver()
+        service = self._service(driver)
+
+        with pytest.raises(RuntimeError):
+            with service:
+                raise RuntimeError("模擬中途出錯")
+
+        assert driver.quit_calls == 1
+        service.__del__()
+        assert driver.quit_calls == 1
+
+    def test_quits_the_driver_even_when_logout_fails(self):
+        driver = _CountingDriver()
+        service = self._service(driver)
+        service.logout = Mock(side_effect=WebDriverException("登出鈕不見了"))
+
+        with pytest.raises(WebDriverException):
+            with service:
+                pass
+
+        assert driver.quit_calls == 1

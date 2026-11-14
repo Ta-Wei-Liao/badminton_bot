@@ -96,6 +96,10 @@ STAGE_POST_CHECK = "事後檢查"
 STAGE_DONE = "完成"
 
 
+class LoginFailed(RuntimeError):
+    """The booking site rejected the credentials."""
+
+
 @dataclass(frozen=True)
 class CenterOption:
     """One sports centre as offered to the user, and whether it may be run."""
@@ -390,6 +394,8 @@ class GrabRunner:
         self._fired = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
+        # 只在 event loop 的執行緒上讀寫：取消是否已經送進 run() 了
+        self._cancel_delivered = False
 
     @property
     def fired(self) -> bool:
@@ -407,16 +413,27 @@ class GrabRunner:
                 return False
 
             self._cancel_event.set()
-            if self._loop is not None and self._task is not None:
-                # 同步的倒數由 cancel_event 打斷；正在 await 的階段則靠 task.cancel
-                self._loop.call_soon_threadsafe(self._task.cancel)
+            if self._loop is not None:
+                # 同步的倒數由 cancel_event 打斷；正在 await 的階段則靠 task.cancel。
+                # 不直接排 task.cancel：loop 卡在同步倒數時它會被延後到收尾的 await，
+                # 把 session 關到一半。交給 loop 執行緒判斷取消是否已經送達。
+                self._loop.call_soon_threadsafe(self._deliver_cancel)
 
             return True
+
+    def _deliver_cancel(self) -> None:
+        """Runs on the loop thread: cancel the task unless Cancelled is already unwinding it."""
+        if self._cancel_delivered or self._task is None or self._task.done():
+            return
+
+        self._cancel_delivered = True
+        self._task.cancel()
 
     def _mark_fired(self) -> None:
         with self._lock:
             # 取消搶先一步：就算倒數已經走完，也一發都不送
             if self._cancel_event.is_set():
+                self._cancel_delivered = True
                 raise Cancelled()
 
             self._fired = True
@@ -424,17 +441,22 @@ class GrabRunner:
         self._on_stage(STAGE_FIRED)
 
     def _count_down(self, offset: timedelta) -> None:
-        count_down(
-            booking_date=self._config.open_at,
-            offset=offset,
-            cancel_event=self._cancel_event,
-        )
+        try:
+            count_down(
+                booking_date=self._config.open_at,
+                offset=offset,
+                cancel_event=self._cancel_event,
+            )
+        except Cancelled:
+            self._cancel_delivered = True
+            raise
 
     async def run(self) -> list[BookingAttempt]:
         """Run the whole grab and return one attempt per target.
 
         Raises:
             ValueError: the centre is disabled or the targets are invalid.
+            LoginFailed: the site rejected the credentials.
             Cancelled: cancel() was accepted before the requests went out.
         """
         config = self._config
@@ -447,6 +469,7 @@ class GrabRunner:
             self._task = asyncio.current_task()
             if self._cancel_event.is_set():
                 # 還沒開始就被取消了，那時候沒有 task 可以 cancel
+                self._cancel_delivered = True
                 raise Cancelled()
 
         try:
@@ -459,184 +482,196 @@ class GrabRunner:
 
     async def _run_schedule(self) -> list[BookingAttempt]:
         config = self._config
-        targets = config.targets
-        # 全部 target 都是同一天，偵察與 referer 都看第一個
-        booking_day = targets[0].start
 
         self._on_stage(STAGE_WAITING_LOGIN)
         theta_ntp = query_clock_offset()
-
-        nominal_epoch = config.open_at.timestamp()
 
         # 倒數至開搶前的登入時間，太早登入有 session 過期的風險
         self._count_down(LOGIN_OFFSET)
 
         self._on_stage(STAGE_LOGGING_IN)
+        attempts: list[BookingAttempt] | None = None
         with config.service_cls(
             username=config.username, password=config.password
         ) as service:
-            if not service.login_status:
-                logging.error("登入失敗！")
-                return []
+            if service.login_status:
+                attempts = await self._grab(service, theta_ntp)
 
-            cookies = service.get_cookies()
-            referer = service._generate_list_page_url(
-                year=booking_day.year, month=booking_day.month, day=booking_day.day
-            )
-
-            async with service.create_session(cookies=cookies, referer=referer) as session:
-                self._on_stage(STAGE_CLOCK)
-                probe_deadline_epoch = (config.open_at + PROBE_DEADLINE_OFFSET).timestamp()
-                measurement = await run_with_deadline(
-                    measure_server_clock(
-                        session=session,
-                        url=referer,
-                        deadline_epoch=probe_deadline_epoch,
-                        # 用 NTP 把搜尋區間平移到對的位置。本機時鐘差幾秒時，
-                        # 預設的 (-2, 2) 會讓真值落在區間外，第一次探測就必然矛盾。
-                        initial_interval=seed_interval(theta_ntp),
-                    ),
-                    budget_seconds=probe_deadline_epoch - time.time(),
-                    label="伺服器時鐘探測",
-                    fallback=ClockMeasurement(theta=None, uncertainty=0.0),
-                )
-                logging.info(
-                    "伺服器校時：θ=%s 不確定度=±%.1f 毫秒 探測 %d 次 捨棄 %d 次",
-                    f"{measurement.theta * 1000:+.1f} 毫秒"
-                    if measurement.theta is not None
-                    else "量測失敗",
-                    measurement.uncertainty * 1000,
-                    measurement.probe_count,
-                    measurement.discarded_count,
-                )
-                if measurement.rtt_samples:
-                    logging.info(
-                        "探測 RTT：min %.1f／median %.1f／max %.1f 毫秒",
-                        min(measurement.rtt_samples) * 1000,
-                        measurement.rtt_median * 1000,
-                        max(measurement.rtt_samples) * 1000,
-                    )
-                if measurement.theta is not None and theta_ntp is not None:
-                    logging.info(
-                        "與 NTP 的差距 %.1f 毫秒（接近代表伺服器有做 NTP，可信度高）",
-                        (measurement.theta - theta_ntp) * 1000,
-                    )
-
-                # 開放前查看場地狀態。列表頁要 4~5 秒，所以提前到 T-40s 單獨做，
-                # 不跟預熱擠在最後十秒。只記錄，不對結果做任何分支。
-                self._on_stage(STAGE_PRE_CHECK)
-                self._count_down(PRE_CHECK_OFFSET)
-                report_slot_states(
-                    service=service,
-                    html=await run_with_deadline(
-                        service.fetch_list_page(
-                            session=session,
-                            year=booking_day.year,
-                            month=booking_day.month,
-                            day=booking_day.day,
-                            timeout_seconds=PRE_CHECK_TIMEOUT_SECONDS,
-                        ),
-                        budget_seconds=PRE_CHECK_TIMEOUT_SECONDS
-                        + LIST_PAGE_DEADLINE_SLACK_SECONDS,
-                        label="開放前場地檢查",
-                        fallback=None,
-                    ),
-                    targets=targets,
-                    label="開放前",
-                )
-
-                # 重新校時。一開始量的值可能已經是好幾小時前的事，
-                # 而實測這台機器十幾分鐘就能漂 1.3 秒。
-                self._count_down(NTP_REFRESH_OFFSET)
-                refreshed_theta_ntp = query_clock_offset()
-                if refreshed_theta_ntp is not None and theta_ntp is not None:
-                    logging.info(
-                        "本機時鐘在這段期間漂移了 %.1f 毫秒",
-                        (refreshed_theta_ntp - theta_ntp) * 1000,
-                    )
-                if refreshed_theta_ntp is not None:
-                    theta_ntp = refreshed_theta_ntp
-
-                if theta_ntp is None:
-                    logging.warning(
-                        "NTP 校時失敗，本次完全不做時鐘校正 —— "
-                        "送出時刻的準確度取決於本機時鐘"
-                    )
-
-                # 倒數至預熱時機，每個請求各預熱一條連線
-                self._on_stage(STAGE_WARM_UP)
-                self._count_down(WARM_UP_OFFSET)
-                await run_with_deadline(
-                    service.warm_up(session=session, count=len(targets)),
-                    budget_seconds=WARM_UP_BUDGET_SECONDS,
-                    label="連線預熱",
-                    fallback=[],
-                )
-
-                # 補償用的是握手量到的飛行時間，不是回應時間 —— 這個站的回應時間
-                # 幾乎都是伺服器處理，拿它的一半去補償會把請求提早好幾秒送出。
-                one_way_seconds = service.handshake_timing.one_way_estimate
-                logging.info(
-                    "單程飛行時間估計 %.1f 毫秒（取自 %d 次握手；回應時間中位數 %.1f 毫秒）",
-                    one_way_seconds * 1000,
-                    len(service.handshake_timing.handshake_samples),
-                    measurement.rtt_median * 1000,
-                )
-
-                send_at_epoch, source, within_clamp = plan_send_time(
-                    nominal_epoch=nominal_epoch,
-                    theta_srv=measurement.theta,
-                    uncertainty=measurement.uncertainty,
-                    theta_ntp=theta_ntp,
-                    one_way_seconds=one_way_seconds,
-                    manual_offset_ms=0,
-                )
-                if not within_clamp:
-                    logging.warning(
-                        "量到的時鐘修正量超出 ±%.0f 秒的上限，已拒絕套用，本次不做任何校正",
-                        MAX_AUTO_CORRECTION_SECONDS,
-                    )
-                logging.info(
-                    "送出時刻相對名目開放時刻 %+.1f 毫秒（來源：%s）",
-                    (send_at_epoch - nominal_epoch) * 1000,
-                    source,
-                )
-
-                self._on_stage(STAGE_COUNTDOWN)
-                attempts = await run_booking_race(
-                    service=service,
-                    session=session,
-                    targets=targets,
-                    send_at_epoch=send_at_epoch,
-                    on_fired=self._mark_fired,
-                )
-                report_attempts(
-                    attempts=attempts, reference_epoch=nominal_epoch, source=source
-                )
-
-                # 事後偵察：這是「輸幾毫秒」與「根本沒開放給你」之間唯一的判別依據
-                self._on_stage(STAGE_POST_CHECK)
-                await asyncio.sleep(POST_CHECK_DELAY_SECONDS)
-                report_slot_states(
-                    service=service,
-                    html=await run_with_deadline(
-                        service.fetch_list_page(
-                            session=session,
-                            year=booking_day.year,
-                            month=booking_day.month,
-                            day=booking_day.day,
-                            timeout_seconds=POST_CHECK_TIMEOUT_SECONDS,
-                        ),
-                        budget_seconds=POST_CHECK_TIMEOUT_SECONDS
-                        + LIST_PAGE_DEADLINE_SLACK_SECONDS,
-                        label="事後偵察",
-                        fallback=None,
-                    ),
-                    targets=targets,
-                    label="開放後",
-                )
+        # 離開 with 之後才拋：登出、關 Chrome 照常完成
+        if attempts is None:
+            logging.error("登入失敗！")
+            raise LoginFailed("登入失敗，請確認身分證字號與密碼")
 
         self._on_stage(STAGE_DONE)
+        return attempts
+
+    async def _grab(
+        self, service: SportsCenterWebService, theta_ntp: float | None
+    ) -> list[BookingAttempt]:
+        """Everything between a successful login and the post-race check."""
+        config = self._config
+        targets = config.targets
+        # 全部 target 都是同一天，偵察與 referer 都看第一個
+        booking_day = targets[0].start
+        nominal_epoch = config.open_at.timestamp()
+
+        cookies = service.get_cookies()
+        referer = service._generate_list_page_url(
+            year=booking_day.year, month=booking_day.month, day=booking_day.day
+        )
+
+        async with service.create_session(cookies=cookies, referer=referer) as session:
+            self._on_stage(STAGE_CLOCK)
+            probe_deadline_epoch = (config.open_at + PROBE_DEADLINE_OFFSET).timestamp()
+            measurement = await run_with_deadline(
+                measure_server_clock(
+                    session=session,
+                    url=referer,
+                    deadline_epoch=probe_deadline_epoch,
+                    # 用 NTP 把搜尋區間平移到對的位置。本機時鐘差幾秒時，
+                    # 預設的 (-2, 2) 會讓真值落在區間外，第一次探測就必然矛盾。
+                    initial_interval=seed_interval(theta_ntp),
+                ),
+                budget_seconds=probe_deadline_epoch - time.time(),
+                label="伺服器時鐘探測",
+                fallback=ClockMeasurement(theta=None, uncertainty=0.0),
+            )
+            logging.info(
+                "伺服器校時：θ=%s 不確定度=±%.1f 毫秒 探測 %d 次 捨棄 %d 次",
+                f"{measurement.theta * 1000:+.1f} 毫秒"
+                if measurement.theta is not None
+                else "量測失敗",
+                measurement.uncertainty * 1000,
+                measurement.probe_count,
+                measurement.discarded_count,
+            )
+            if measurement.rtt_samples:
+                logging.info(
+                    "探測 RTT：min %.1f／median %.1f／max %.1f 毫秒",
+                    min(measurement.rtt_samples) * 1000,
+                    measurement.rtt_median * 1000,
+                    max(measurement.rtt_samples) * 1000,
+                )
+            if measurement.theta is not None and theta_ntp is not None:
+                logging.info(
+                    "與 NTP 的差距 %.1f 毫秒（接近代表伺服器有做 NTP，可信度高）",
+                    (measurement.theta - theta_ntp) * 1000,
+                )
+
+            # 開放前查看場地狀態。列表頁要 4~5 秒，所以提前到 T-40s 單獨做，
+            # 不跟預熱擠在最後十秒。只記錄，不對結果做任何分支。
+            self._on_stage(STAGE_PRE_CHECK)
+            self._count_down(PRE_CHECK_OFFSET)
+            report_slot_states(
+                service=service,
+                html=await run_with_deadline(
+                    service.fetch_list_page(
+                        session=session,
+                        year=booking_day.year,
+                        month=booking_day.month,
+                        day=booking_day.day,
+                        timeout_seconds=PRE_CHECK_TIMEOUT_SECONDS,
+                    ),
+                    budget_seconds=PRE_CHECK_TIMEOUT_SECONDS
+                    + LIST_PAGE_DEADLINE_SLACK_SECONDS,
+                    label="開放前場地檢查",
+                    fallback=None,
+                ),
+                targets=targets,
+                label="開放前",
+            )
+
+            # 重新校時。一開始量的值可能已經是好幾小時前的事，
+            # 而實測這台機器十幾分鐘就能漂 1.3 秒。
+            self._count_down(NTP_REFRESH_OFFSET)
+            refreshed_theta_ntp = query_clock_offset()
+            if refreshed_theta_ntp is not None and theta_ntp is not None:
+                logging.info(
+                    "本機時鐘在這段期間漂移了 %.1f 毫秒",
+                    (refreshed_theta_ntp - theta_ntp) * 1000,
+                )
+            if refreshed_theta_ntp is not None:
+                theta_ntp = refreshed_theta_ntp
+
+            if theta_ntp is None:
+                logging.warning(
+                    "NTP 校時失敗，本次完全不做時鐘校正 —— "
+                    "送出時刻的準確度取決於本機時鐘"
+                )
+
+            # 倒數至預熱時機，每個請求各預熱一條連線
+            self._on_stage(STAGE_WARM_UP)
+            self._count_down(WARM_UP_OFFSET)
+            await run_with_deadline(
+                service.warm_up(session=session, count=len(targets)),
+                budget_seconds=WARM_UP_BUDGET_SECONDS,
+                label="連線預熱",
+                fallback=[],
+            )
+
+            # 補償用的是握手量到的飛行時間，不是回應時間 —— 這個站的回應時間
+            # 幾乎都是伺服器處理，拿它的一半去補償會把請求提早好幾秒送出。
+            one_way_seconds = service.handshake_timing.one_way_estimate
+            logging.info(
+                "單程飛行時間估計 %.1f 毫秒（取自 %d 次握手；回應時間中位數 %.1f 毫秒）",
+                one_way_seconds * 1000,
+                len(service.handshake_timing.handshake_samples),
+                measurement.rtt_median * 1000,
+            )
+
+            send_at_epoch, source, within_clamp = plan_send_time(
+                nominal_epoch=nominal_epoch,
+                theta_srv=measurement.theta,
+                uncertainty=measurement.uncertainty,
+                theta_ntp=theta_ntp,
+                one_way_seconds=one_way_seconds,
+                manual_offset_ms=0,
+            )
+            if not within_clamp:
+                logging.warning(
+                    "量到的時鐘修正量超出 ±%.0f 秒的上限，已拒絕套用，本次不做任何校正",
+                    MAX_AUTO_CORRECTION_SECONDS,
+                )
+            logging.info(
+                "送出時刻相對名目開放時刻 %+.1f 毫秒（來源：%s）",
+                (send_at_epoch - nominal_epoch) * 1000,
+                source,
+            )
+
+            self._on_stage(STAGE_COUNTDOWN)
+            attempts = await run_booking_race(
+                service=service,
+                session=session,
+                targets=targets,
+                send_at_epoch=send_at_epoch,
+                on_fired=self._mark_fired,
+            )
+            report_attempts(
+                attempts=attempts, reference_epoch=nominal_epoch, source=source
+            )
+
+            # 事後偵察：這是「輸幾毫秒」與「根本沒開放給你」之間唯一的判別依據
+            self._on_stage(STAGE_POST_CHECK)
+            await asyncio.sleep(POST_CHECK_DELAY_SECONDS)
+            report_slot_states(
+                service=service,
+                html=await run_with_deadline(
+                    service.fetch_list_page(
+                        session=session,
+                        year=booking_day.year,
+                        month=booking_day.month,
+                        day=booking_day.day,
+                        timeout_seconds=POST_CHECK_TIMEOUT_SECONDS,
+                    ),
+                    budget_seconds=POST_CHECK_TIMEOUT_SECONDS
+                    + LIST_PAGE_DEADLINE_SLACK_SECONDS,
+                    label="事後偵察",
+                    fallback=None,
+                ),
+                targets=targets,
+                label="開放後",
+            )
+
         return attempts
 
 

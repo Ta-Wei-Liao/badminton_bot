@@ -1,6 +1,7 @@
 """Tests for the grab engine. No network, no browser."""
 
 import asyncio
+import gc
 import inspect
 import logging
 import sys
@@ -13,6 +14,7 @@ import pytest
 from badminton_bot.booking_plan import TAIPEI, BookingTarget
 from badminton_bot.engine import (
     CENTER_OPTIONS,
+    LoginFailed,
     NTP_REFRESH_OFFSET,
     POST_CHECK_DELAY_SECONDS,
     POST_CHECK_TIMEOUT_SECONDS,
@@ -33,6 +35,7 @@ from badminton_bot.services.zhongshan_sports_center_webservice import (
 from badminton_bot.services.zhongzheng_sports_center_webservice import (
     ZhongzhengSportsCenterWebService,
 )
+from badminton_bot.utils.server_clock import ClockMeasurement
 from badminton_bot.utils.timing import Cancelled
 from tests.conftest import FakeResponse, FakeService, make_targets
 
@@ -509,3 +512,72 @@ class TestGrabRunner:
 
     def test_password_never_appears_in_config_repr(self):
         assert "s3cret" not in repr(make_config())
+
+    def test_login_failure_raises_instead_of_returning_nothing(self, offline_engine, monkeypatch):
+        """空的結果清單在視窗上看起來像「沒搶到」，登入失敗必須講清楚。"""
+        monkeypatch.setattr(FakeService, "login", lambda self: None)
+
+        with pytest.raises(LoginFailed, match="登入失敗，請確認身分證字號與密碼"):
+            asyncio.run(GrabRunner(make_config(open_in=timedelta(minutes=1))).run())
+
+        (service,) = FakeService.instances
+        assert service.logged_out
+        assert service.session.booking_urls == []
+
+
+class TestCancelDuringCountdownUnwindsCleanly:
+    """在同步倒數裡被取消時，殘留的 task.cancel 不能把 session 關到一半。"""
+
+    @staticmethod
+    def _skip_probe(monkeypatch):
+        from badminton_bot import engine
+
+        async def no_probe(*args, **kwargs):
+            return ClockMeasurement(theta=None, uncertainty=0.0)
+
+        monkeypatch.setattr(engine, "measure_server_clock", no_probe)
+
+    def _cancel_during_pre_check(self) -> GrabRunner:
+        # open_at 在一分鐘後：馬上登入，接著卡在 T-40s 的同步倒數裡
+        runner = GrabRunner(make_config(open_in=timedelta(minutes=1)))
+        threading.Timer(0.3, runner.cancel).start()
+        with pytest.raises(Cancelled):
+            asyncio.run(runner.run())
+        return runner
+
+    def test_the_session_finishes_closing(self, offline_engine, monkeypatch):
+        self._skip_probe(monkeypatch)
+        self._cancel_during_pre_check()
+
+        (service,) = FakeService.instances
+        assert service.session.closed
+        assert service.logged_out
+
+    def test_a_real_aiohttp_session_is_closed_without_warnings(
+        self, offline_engine, monkeypatch, caplog
+    ):
+        import aiohttp
+
+        self._skip_probe(monkeypatch)
+        sessions: list[aiohttp.ClientSession] = []
+
+        def real_session(self, cookies, referer):
+            self.handshake_timing = None
+            session = aiohttp.ClientSession()
+            sessions.append(session)
+            return session
+
+        monkeypatch.setattr(FakeService, "create_session", real_session)
+
+        with caplog.at_level(logging.WARNING):
+            import warnings
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                self._cancel_during_pre_check()
+                gc.collect()
+
+        (session,) = sessions
+        assert session.closed
+        assert not [w for w in caught if issubclass(w.category, ResourceWarning)]
+        assert "Unclosed" not in caplog.text

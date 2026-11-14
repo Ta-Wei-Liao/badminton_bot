@@ -1,5 +1,6 @@
 """Shared offline fakes for exercising GrabRunner end to end. No network, no browser."""
 
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -35,6 +36,7 @@ class FakeSession:
 
     def __init__(self):
         self.requested_urls: list[str] = []
+        self.closed = False
 
     def get(self, url, **kwargs):
         self.requested_urls.append(url)
@@ -50,6 +52,11 @@ class FakeSession:
         return self
 
     async def __aexit__(self, *exc_info):
+        # 真的 aiohttp session 關閉時會 await；讓出一次控制權，
+        # 才測得出「關到一半被殘留的取消打斷」這種情況
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.closed = True
         return False
 
 

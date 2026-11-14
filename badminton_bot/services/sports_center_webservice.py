@@ -279,22 +279,31 @@ class SportsCenterWebService(ABC):
         """
         return build_chrome_options()
 
-    def __del__(self) -> None:
+    def _quit_driver(self) -> None:
+        """Quit Chrome once; later calls (e.g. from __del__) are no-ops."""
         # 瀏覽器有可能還沒開起來就失敗，這時不需要（也無法）關閉，
         # 否則 __del__ 拋出的 AttributeError 會蓋掉原本真正的錯誤
         driver = getattr(self, "_driver", None)
         if driver is None:
             return
 
+        self._driver = None
         logging.info("關閉瀏覽器")
         driver.quit()
+
+    def __del__(self) -> None:
+        self._quit_driver()
 
     def __enter__(self):
         self.login()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.logout()
+        # 離開時一定關掉 Chrome，不能等垃圾回收：取消時 traceback 會讓物件多活一陣子
+        try:
+            self.logout()
+        finally:
+            self._quit_driver()
 
     def login(self) -> None:
         """輸入帳密並且登入網路預約平台"""
