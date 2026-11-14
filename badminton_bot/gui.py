@@ -14,7 +14,7 @@ import sys
 import threading
 import tkinter as tk
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -22,14 +22,21 @@ from tkinter.scrolledtext import ScrolledText
 from badminton_bot import __version__
 from badminton_bot.booking_plan import (
     BOOKABLE_HOURS,
+    IMMEDIATE_REMINDER,
     TAIPEI,
     TOO_CLOSE,
+    GrabMode,
+    bookable_hours,
     booking_day,
+    describe_confirmation,
+    describe_day,
     describe_schedule,
     describe_selection,
     expand_targets,
+    immediate_days,
     next_open_at,
     summarize,
+    summarize_immediate,
 )
 from badminton_bot.engine import (
     CENTER_OPTIONS,
@@ -78,6 +85,12 @@ class QueueLogHandler(logging.Handler):
 
 def is_dev_mode(environ: Mapping[str, str] = os.environ) -> bool:
     return environ.get("BADMINTON_BOT_DEV") == "1"
+
+
+def day_choices(now: datetime, window_days: int) -> list[tuple[str, date]]:
+    """(label, day) for every day 立即預約 can book right now, today first."""
+    today = now.astimezone(TAIPEI).date()
+    return [(describe_day(day, today), day) for day in immediate_days(now, window_days)]
 
 
 def results_grid(attempts: Sequence[BookingAttempt]) -> dict[tuple[str, int], str]:
@@ -172,6 +185,7 @@ class App:
         self.pinned_status: str | None = None
         self.closing = False
         self.log_path: Path | None = None
+        self._refreshing = False
 
         root.title(f"羽球場地搶訂 v{__version__}")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -188,26 +202,44 @@ class App:
         form.grid(row=0, column=0, sticky="nsew")
         self.inputs: list[tk.Widget] = []
 
-        ttk.Label(form, text="運動中心").grid(row=0, column=0, sticky="w")
+        modes = ttk.Frame(form)
+        modes.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.mode = tk.StringVar(value=GrabMode.MIDNIGHT.value)
+        for i, mode in enumerate(GrabMode):
+            radio = ttk.Radiobutton(
+                modes, text=mode.value, value=mode.value, variable=self.mode
+            )
+            radio.grid(row=0, column=i, padx=(0, 12))
+            self.inputs.append(radio)
+
+        ttk.Label(form, text="運動中心").grid(row=1, column=0, sticky="w")
         self.center_box = ttk.Combobox(
             form, state="readonly", values=[o.label for o in CENTER_OPTIONS]
         )
         self.center_box.current(CENTER_OPTIONS.index(self.center))
         self.center_box.bind("<<ComboboxSelected>>", self._on_center_selected)
-        self.center_box.grid(row=0, column=1, sticky="ew", pady=2)
+        self.center_box.grid(row=1, column=1, sticky="ew", pady=2)
 
         self.username = tk.StringVar()
         self.password = tk.StringVar()
-        ttk.Label(form, text="身分證字號").grid(row=1, column=0, sticky="w")
+        ttk.Label(form, text="身分證字號").grid(row=2, column=0, sticky="w")
         username_entry = ttk.Entry(form, textvariable=self.username)
-        username_entry.grid(row=1, column=1, sticky="ew", pady=2)
-        ttk.Label(form, text="密碼").grid(row=2, column=0, sticky="w")
+        username_entry.grid(row=2, column=1, sticky="ew", pady=2)
+        ttk.Label(form, text="密碼").grid(row=3, column=0, sticky="w")
         password_entry = ttk.Entry(form, textvariable=self.password, show="•")
-        password_entry.grid(row=2, column=1, sticky="ew", pady=2)
+        password_entry.grid(row=3, column=1, sticky="ew", pady=2)
         self.inputs += [username_entry, password_entry]
 
+        # 立即預約才有的欄位：日期選單與提醒
+        self.day_label = ttk.Label(form, text="預約日期")
+        self.day_label.grid(row=4, column=0, sticky="w")
+        self.day_box = ttk.Combobox(form, state="readonly")
+        self.day_box.bind("<<ComboboxSelected>>", lambda _event: self._refresh())
+        self.day_box.grid(row=4, column=1, sticky="ew", pady=2)
+        self.day_options: list[tuple[str, date]] = []
+
         courts_frame = ttk.LabelFrame(form, text="場地", padding=6)
-        courts_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=4)
+        courts_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=4)
         self.court_vars = [tk.BooleanVar() for _ in self.courts]
         for i, (court, var) in enumerate(zip(self.courts, self.court_vars)):
             check = ttk.Checkbutton(courts_frame, text=court.name, variable=var)
@@ -215,17 +247,26 @@ class App:
             self.inputs.append(check)
 
         hours_frame = ttk.LabelFrame(form, text="時段", padding=6)
-        hours_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=4)
+        hours_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=4)
         self.hour_vars = [tk.BooleanVar() for _ in BOOKABLE_HOURS]
+        self.hour_checks: list[ttk.Checkbutton] = []
         for i, (hour, var) in enumerate(zip(BOOKABLE_HOURS, self.hour_vars)):
             check = ttk.Checkbutton(
                 hours_frame, text=f"{hour:02d}:00–{hour + 1:02d}:00", variable=var
             )
             check.grid(row=i // 4, column=i % 4, sticky="w", padx=4)
+            self.hour_checks.append(check)
             self.inputs.append(check)
 
+        self.reminder = ttk.Label(
+            form, text=IMMEDIATE_REMINDER, foreground=WARNING_COLOUR, wraplength=520
+        )
+        self.reminder.grid(row=7, column=0, columnspan=2, sticky="w")
+
         tracked = [self.username, self.password, *self.court_vars, *self.hour_vars]
-        next_row = 5
+        next_row = 8
+        # 開發欄位只屬於搶午夜，切到立即預約時隱藏也不採用
+        self.dev_widgets: list[tk.Widget] = []
         if self.dev_mode:
             now = datetime.now(TAIPEI)
             self.dev_open_at = tk.StringVar(value=now.strftime(DEV_OPEN_AT_FORMAT))
@@ -234,14 +275,17 @@ class App:
                 ("開搶時刻（開發）", self.dev_open_at),
                 ("預約日期（開發）", self.dev_day),
             ):
-                ttk.Label(form, text=label).grid(row=next_row, column=0, sticky="w")
+                label_widget = ttk.Label(form, text=label)
+                label_widget.grid(row=next_row, column=0, sticky="w")
                 entry = ttk.Entry(form, textvariable=var)
                 entry.grid(row=next_row, column=1, sticky="ew", pady=2)
                 self.inputs.append(entry)
+                self.dev_widgets += [label_widget, entry]
                 next_row += 1
             tracked += [self.dev_open_at, self.dev_day]
         for var in tracked:
             var.trace_add("write", lambda *_: self._refresh())
+        self.mode.trace_add("write", lambda *_: self._on_mode_changed())
 
         self.summary = ttk.Label(form, wraplength=520)
         self.summary.grid(row=next_row, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -257,6 +301,7 @@ class App:
         )
         self.cancel_button.grid(row=0, column=1, padx=6)
         form.columnconfigure(1, weight=1)
+        self._on_mode_changed()
 
     def _build_run_view(self) -> None:
         view = ttk.Frame(self.root, padding=(12, 0, 12, 12))
@@ -283,8 +328,48 @@ class App:
     def _selected_hours(self) -> list[int]:
         return [h for h, v in zip(BOOKABLE_HOURS, self.hour_vars) if v.get()]
 
+    def _mode(self) -> GrabMode:
+        return GrabMode(self.mode.get())
+
+    def _on_mode_changed(self) -> None:
+        immediate = self._mode() is GrabMode.IMMEDIATE
+        for widget in (self.day_label, self.day_box, self.reminder):
+            widget.grid() if immediate else widget.grid_remove()
+        for widget in self.dev_widgets:
+            widget.grid_remove() if immediate else widget.grid()
+        self._refresh()
+
+    def _sync_days(self, now: datetime) -> date:
+        """Keep the day menu in step with the clock; return the selected day."""
+        choices = day_choices(now, self.center.service_cls.booking_window_days)
+        current = self.day_box.current()
+        selected = self.day_options[current][1] if 0 <= current < len(self.day_options) else None
+        if choices != self.day_options:
+            self.day_options = choices
+            self.day_box.configure(values=[label for label, _ in choices])
+        days = [day for _, day in choices]
+        # 跨過午夜後原本選的日期可能已經是昨天，回到今天
+        self.day_box.current(days.index(selected) if selected in days else 0)
+        return choices[self.day_box.current()][1]
+
+    def _apply_hour_rule(self, day: date | None, now: datetime) -> None:
+        """Untick and disable hours that have already started on day (None: allow all)."""
+        allowed = BOOKABLE_HOURS if day is None else bookable_hours(day, now)
+        for hour, var, check in zip(BOOKABLE_HOURS, self.hour_vars, self.hour_checks):
+            if hour in allowed:
+                check.configure(state="normal")
+            else:
+                if var.get():
+                    var.set(False)
+                check.configure(state="disabled")
+
     def _schedule(self, now: datetime):
-        """(open_at, booking day) for a run started now. Raises ValueError on bad dev input."""
+        """(open_at, booking day) for a run started now. Raises ValueError on bad dev input.
+
+        立即預約 has no open time, so open_at is None.
+        """
+        if self._mode() is GrabMode.IMMEDIATE:
+            return None, self._sync_days(now)
         if self.dev_mode:
             open_at = datetime.strptime(
                 self.dev_open_at.get().strip(), DEV_OPEN_AT_FORMAT
@@ -295,15 +380,39 @@ class App:
         return open_at, booking_day(open_at, self.center.service_cls.booking_window_days)
 
     def _refresh(self) -> None:
-        if self.runner is not None:
+        # 取消勾選已過去的時段會觸發 trace 再呼叫一次，外層算完就好
+        if self.runner is not None or self._refreshing:
             return
+        self._refreshing = True
+        try:
+            self._refresh_form()
+        finally:
+            self._refreshing = False
+
+    def _refresh_form(self) -> None:
         now = datetime.now(TAIPEI)
+        has_credentials = bool(self.username.get().strip() and self.password.get())
+        if self._mode() is GrabMode.IMMEDIATE:
+            day = self._sync_days(now)
+            self._apply_hour_rule(day, now)
+            result = summarize_immediate(
+                now,
+                self._selected_courts(),
+                self._selected_hours(),
+                day,
+                self.center.service_cls.booking_window_days,
+                has_credentials,
+            )
+            self._show_summary(result.text, result.can_start, result.warning)
+            return
+
+        self._apply_hour_rule(None, now)
         result = summarize(
             now,
             self._selected_courts(),
             self._selected_hours(),
             self.center.service_cls.booking_window_days,
-            bool(self.username.get().strip() and self.password.get()),
+            has_credentials,
         )
         text, can_start, warning = result.text, result.can_start, result.warning
         if self.dev_mode:
@@ -318,6 +427,9 @@ class App:
                         len(self._selected_courts()), len(self._selected_hours())
                     )
                     text = f"{selection}｜開發模式：{describe_schedule(open_at, day)}"
+        self._show_summary(text, can_start, warning)
+
+    def _show_summary(self, text: str, can_start: bool, warning: str | None) -> None:
         self.summary.configure(text=text)
         self.warning.configure(text=warning or "")
         self.start_button.configure(state="normal" if can_start else "disabled")
@@ -334,6 +446,7 @@ class App:
         for widget in self.inputs:
             widget.configure(state="disabled" if locked else "normal")
         self.center_box.configure(state="disabled" if locked else "readonly")
+        self.day_box.configure(state="disabled" if locked else "readonly")
         self.cancel_button.configure(state="normal" if locked else "disabled")
         if locked:
             self.start_button.configure(state="disabled")
@@ -346,13 +459,33 @@ class App:
             open_at, day = self._schedule(now)
         except ValueError:
             return
+        mode = self._mode()
+        if mode is GrabMode.IMMEDIATE:
+            # 表單上次更新到現在，可能剛好跨過整點；引擎會拒絕，先在這裡講清楚
+            check = summarize_immediate(
+                now,
+                self._selected_courts(),
+                self._selected_hours(),
+                day,
+                self.center.service_cls.booking_window_days,
+                True,
+            )
+            if not check.can_start:
+                messagebox.showinfo("無法預約", check.text)
+                self._refresh()
+                return
         targets = expand_targets(self._selected_courts(), self._selected_hours(), day)
+        if mode is GrabMode.IMMEDIATE and not messagebox.askokcancel(
+            "確認立即預約", describe_confirmation(targets), icon="warning"
+        ):
+            return
         config = GrabConfig(
             service_cls=self.center.service_cls,
             username=self.username.get().strip(),
             password=self.password.get(),
             open_at=open_at,
             targets=targets,
+            mode=mode,
         )
         handler = QueueLogHandler(self.messages)
         try:
@@ -383,9 +516,14 @@ class App:
         self._update_status()
 
     def _update_status(self) -> None:
-        if self.runner is None or self.open_at is None:
+        if self.runner is None:
             return
-        remaining = (self.open_at - datetime.now(TAIPEI)).total_seconds()
+        # 立即預約沒有開搶時刻，只顯示目前階段
+        remaining = (
+            (self.open_at - datetime.now(TAIPEI)).total_seconds()
+            if self.open_at is not None
+            else 0.0
+        )
         text = status_text(self.stage, remaining, self.runner.fired, self.pinned_status)
         if text is not None:
             self.status.set(text)
