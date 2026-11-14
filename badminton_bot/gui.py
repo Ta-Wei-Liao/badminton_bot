@@ -45,13 +45,16 @@ from badminton_bot.services.sports_center_webservice import (
     BookingAttempt,
     BrowserUnavailable,
 )
-from badminton_bot.utils.timing import Cancelled
+from badminton_bot.utils.timing import MAX_AUTO_CORRECTION_SECONDS, Cancelled
 
 DEV_OPEN_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEV_DAY_FORMAT = "%Y-%m-%d"
 
 # 最後這幾秒引擎在 busy-wait，Tk 重繪會搶 GIL，只更新倒數數字
 QUIET_SECONDS = 10
+
+STATUS_CANCELLING = "取消中…"
+STATUS_CLOSING = "正在結束…"
 
 WARNING_COLOUR = "#d9822b"
 
@@ -93,6 +96,33 @@ def format_remaining(seconds: float) -> str:
     return f"{secs} 秒"
 
 
+def in_quiet_window(remaining: float, fired: bool) -> bool:
+    """Whether the log view should hold still, given the seconds left to nominal open_at.
+
+    The real send instant is nominal + θ and can land after nominal, by at most
+    the largest correction the engine accepts, so stay quiet until fired.
+    """
+    return not fired and -MAX_AUTO_CORRECTION_SECONDS < remaining <= QUIET_SECONDS
+
+
+def status_text(
+    stage: str, remaining: float, fired: bool, pinned: str | None = None
+) -> str | None:
+    """The big status line, or None when there is nothing to show yet.
+
+    A pinned status (e.g. 取消中…) wins over every stage until the outcome arrives.
+    """
+    if pinned is not None:
+        return pinned
+    if not stage:
+        return None
+    if fired or remaining <= 0:
+        return stage
+    if stage == STAGE_COUNTDOWN:
+        return f"倒數 {format_remaining(remaining)}"
+    return f"{stage}（還有 {format_remaining(remaining)}）"
+
+
 def stage_reporter(events: queue.Queue) -> Callable[[str], None]:
     """The on_stage callback handed to the engine: it only enqueues, never touches Tk."""
 
@@ -110,7 +140,8 @@ def run_grab(runner: GrabRunner, events: queue.Queue) -> None:
         events.put(("cancelled", None))
     except (BrowserUnavailable, LoginFailed) as error:
         events.put(("error", str(error)))
-    except Exception as error:
+    except BaseException as error:
+        # 不管背景執行緒怎麼結束都要回報，否則表單會永遠鎖住
         logging.exception("發生未預期的錯誤")
         events.put(("unexpected", repr(error)))
 
@@ -136,6 +167,8 @@ class App:
         self.runner: GrabRunner | None = None
         self.open_at: datetime | None = None
         self.stage = ""
+        # 取消後固定顯示的狀態，直到結果回來；否則每秒的更新會把它蓋掉
+        self.pinned_status: str | None = None
         self.closing = False
         self.log_path: Path | None = None
 
@@ -335,6 +368,7 @@ class App:
         self.log_text.configure(state="disabled")
         self.open_at = open_at
         self.stage = ""
+        self.pinned_status = None
         self.runner = GrabRunner(config, on_stage=stage_reporter(self.events))
         self._set_form_state(locked=True)
         threading.Thread(
@@ -348,35 +382,33 @@ class App:
         self._update_status()
 
     def _update_status(self) -> None:
-        stage = self.stage
-        if self.runner is None or not stage or self.open_at is None:
+        if self.runner is None or self.open_at is None:
             return
         remaining = (self.open_at - datetime.now(TAIPEI)).total_seconds()
-        if self.runner.fired or remaining <= 0:
-            self.status.set(stage)
-        elif stage == STAGE_COUNTDOWN:
-            self.status.set(f"倒數 {format_remaining(remaining)}")
-        else:
-            self.status.set(f"{stage}（還有 {format_remaining(remaining)}）")
+        text = status_text(self.stage, remaining, self.runner.fired, self.pinned_status)
+        if text is not None:
+            self.status.set(text)
 
     def _in_quiet_window(self) -> bool:
-        if self.runner is None or self.open_at is None or self.runner.fired:
+        if self.runner is None or self.open_at is None:
             return False
         remaining = (self.open_at - datetime.now(TAIPEI)).total_seconds()
-        return 0 < remaining <= QUIET_SECONDS
+        return in_quiet_window(remaining, self.runner.fired)
 
     def _cancel(self) -> None:
         if self.runner is None:
             return
         if self.runner.cancel():
             self.cancel_button.configure(state="disabled")
-            self.status.set("取消中…")
+            self.pinned_status = STATUS_CANCELLING
+            self.status.set(STATUS_CANCELLING)
         else:
             messagebox.showinfo("無法取消", "請求已送出，無法取消")
 
     def _on_finished(self, kind: str, payload) -> None:
         self.runner = None
         self.open_at = None
+        self.pinned_status = None
         self._drain_log()
         self._set_form_state(locked=False)
         if self.closing:
@@ -408,7 +440,8 @@ class App:
         self.closing = True
         if not self.runner.cancel():
             messagebox.showinfo("無法取消", "請求已送出，無法取消，完成後會自動關閉")
-        self.status.set("正在結束…")
+        self.pinned_status = STATUS_CLOSING
+        self.status.set(STATUS_CLOSING)
 
     # ---- log 與結果 ----
 
@@ -481,7 +514,8 @@ class App:
         ttk.Button(
             self.results,
             text="打開 log 資料夾",
-            command=lambda: open_folder(LOG_DIR),
+            # log 可能因「文件」寫不進去而改存別處，開實際用到的那個資料夾
+            command=lambda path=self.log_path.parent: open_folder(path),
         ).grid(row=2, column=1, padx=6)
 
 

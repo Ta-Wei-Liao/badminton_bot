@@ -9,13 +9,17 @@ from datetime import datetime, timedelta
 from badminton_bot.booking_plan import TAIPEI
 from badminton_bot.engine import GrabConfig, GrabRunner, set_logger
 from badminton_bot.gui import (
+    QUIET_SECONDS,
     QueueLogHandler,
     format_remaining,
+    in_quiet_window,
     is_dev_mode,
     results_grid,
     run_grab,
     stage_reporter,
+    status_text,
 )
+from badminton_bot.utils.timing import MAX_AUTO_CORRECTION_SECONDS
 from badminton_bot.services.sports_center_webservice import BookingAttempt
 from tests.conftest import FakeService, make_targets
 
@@ -131,3 +135,62 @@ def test_run_grab_reports_a_cancel_as_cancelled(offline_engine):
     run_grab(runner, events)
 
     assert drain(events)[-1] == ("cancelled", None)
+
+
+def test_run_grab_reports_even_a_base_exception():
+    """背景執行緒不管怎麼死，都要回報結果，否則表單永遠鎖住。"""
+
+    class Abort(BaseException):
+        pass
+
+    class AbortingRunner:
+        async def run(self):
+            raise Abort("模擬非 Exception 的錯誤")
+
+    events: queue.Queue = queue.Queue()
+    run_grab(AbortingRunner(), events)
+
+    kind, payload = drain(events)[-1]
+    assert kind == "unexpected"
+    assert "模擬非 Exception 的錯誤" in payload
+
+
+class TestQuietWindow:
+    """實際送出時刻會因校時晚於名目開搶時刻，過了名目時刻仍要保持安靜到送出為止。"""
+
+    def test_quiet_in_the_last_seconds_before_open(self):
+        assert in_quiet_window(remaining=QUIET_SECONDS, fired=False)
+        assert in_quiet_window(remaining=0.5, fired=False)
+
+    def test_not_quiet_while_far_away(self):
+        assert not in_quiet_window(remaining=QUIET_SECONDS + 1, fired=False)
+
+    def test_stays_quiet_past_nominal_until_fired(self):
+        assert in_quiet_window(remaining=0, fired=False)
+        assert in_quiet_window(remaining=-2.5, fired=False)
+
+    def test_not_quiet_once_fired(self):
+        assert not in_quiet_window(remaining=-0.1, fired=True)
+        assert not in_quiet_window(remaining=3, fired=True)
+
+    def test_gives_up_after_the_largest_possible_correction(self):
+        assert not in_quiet_window(remaining=-MAX_AUTO_CORRECTION_SECONDS - 1, fired=False)
+
+
+class TestStatusText:
+    def test_countdown_shows_the_time_left(self):
+        assert status_text("倒數", remaining=65, fired=False) == "倒數 1 分 5 秒"
+
+    def test_other_stages_show_the_time_left_in_brackets(self):
+        assert status_text("校時中", remaining=65, fired=False) == "校時中（還有 1 分 5 秒）"
+
+    def test_after_firing_shows_the_stage_alone(self):
+        assert status_text("已送出，等待回應", remaining=-1, fired=True) == "已送出，等待回應"
+
+    def test_a_pinned_status_survives_every_tick(self):
+        """按下取消後，下一秒的更新不能把「取消中…」蓋掉。"""
+        assert status_text("校時中", remaining=65, fired=False, pinned="取消中…") == "取消中…"
+        assert status_text("倒數", remaining=3, fired=False, pinned="取消中…") == "取消中…"
+
+    def test_nothing_to_show_without_a_stage(self):
+        assert status_text("", remaining=65, fired=False) is None
