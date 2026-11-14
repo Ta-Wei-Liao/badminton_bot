@@ -89,6 +89,8 @@
 每次執行都會留下一個 log 檔，位置在：
 
 - `文件/badminton_bot_logs`（Windows 與 Mac 都是使用者資料夾下的 `Documents/badminton_bot_logs`）
+- 如果系統不讓程式寫入「文件」資料夾，會改存在使用者資料夾下的 `badminton_bot_logs`，
+  再不行就存到系統暫存資料夾；實際位置會寫在視窗的訊息裡，結果畫面也會顯示
 
 結果畫面也有「打開 log 資料夾」按鈕。log 檔**不會**包含你的密碼。
 
@@ -115,5 +117,6 @@ pytest                            # 全部離線測試
 ./bundling_scripts.sh             # 本機打包成 dist/BadmintonBot.app
 ```
 
-發佈：推送 `v*` 標籤（例如 `git tag v1.0.0 && git push origin v1.0.0`），
-GitHub Actions 會在 macOS 與 Windows 上建置並把 zip 上傳到 Release。
+發佈：先把 `badminton_bot/__init__.py` 的 `__version__` 改成新版號，再推送同名的 `v*` 標籤
+（例如 `git tag v1.0.0 && git push origin v1.0.0`），兩者不一致時 GitHub Actions 會直接失敗；
+一致的話會在 macOS 與 Windows 上建置並把 zip 上傳到 Release。
