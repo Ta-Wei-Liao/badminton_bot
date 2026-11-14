@@ -782,6 +782,50 @@ class TestWarmUp:
         assert all(result.ok is False for result in results)
 
 
+class TestErrorsNeverLeakCookies:
+    """log 會傳給作者，失敗訊息不能帶出 aiohttp 錯誤裡的登入 cookie。"""
+
+    class LeakySession:
+        def get(self, url, **kwargs):
+            from tests.test_errors import cookie_carrying_error
+
+            raise cookie_carrying_error()
+
+    def test_booking_failure(self, caplog):
+        from tests.test_errors import SECRET
+
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=self.LeakySession(),
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+                court=COURT,
+            )
+
+        attempt = asyncio.run(scenario())
+        assert attempt.error and "TooManyRedirects" in attempt.error
+        assert SECRET not in attempt.error
+        assert SECRET not in caplog.text
+
+    def test_warm_up_and_list_page_failures(self, caplog):
+        from tests.test_errors import SECRET
+
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        asyncio.run(service.warm_up(session=self.LeakySession(), count=2))
+        asyncio.run(
+            service.fetch_list_page(
+                session=self.LeakySession(), year=2026, month=9, day=17, timeout_seconds=15.0
+            )
+        )
+        assert "TooManyRedirects" in caplog.text
+        assert SECRET not in caplog.text
+
+
 from badminton_bot.services.sports_center_webservice import (
     MAX_ONE_WAY_SECONDS,
     HandshakeTiming,

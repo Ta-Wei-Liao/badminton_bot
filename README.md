@@ -124,7 +124,7 @@
 
 ```bash
 pyenv activate badminton_bot
-pip install -r requirements.txt
+pip install -r requirements.txt -c constraints.txt
 python -m badminton_bot.main      # 開啟視窗
 pytest                            # 全部離線測試
 ./bundling_scripts.sh             # 本機打包成 dist/BadmintonBot.app

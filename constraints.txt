@@ -1,0 +1,40 @@
+# 間接相依套件的版本鎖定：每次打包都抓最新版的話，任何一個套件的新版被植入惡意程式，
+# 就會進到球友下載的程式裡。這裡的版本取自 v1.0.1 在 macOS 與 Windows 上實際打包成功的組合。
+# 升級：改 requirements.txt 後，在兩個平台的 CI log 找 "Successfully installed" 那行更新這裡。
+# 用法：pip install -r requirements.txt -c constraints.txt
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.5
+aiosignal==1.4.0
+altgraph==0.17.5
+attrs==26.1.0
+certifi==2026.10.23
+cffi==2.1.1
+colorama==0.4.6
+frozenlist==1.8.0
+h11==0.16.0
+idna==3.20
+iniconfig==2.3.1
+macholib==1.16.4
+multidict==7.2.1
+outcome==1.3.0.post0
+packaging==26.3
+pefile==2023.2.7
+pluggy==1.7.0
+propcache==0.5.4
+pycparser==3.12
+pygments==2.21.0
+pyinstaller-hooks-contrib==2026.10
+pyinstaller==6.12.0
+pysocks==1.7.1
+pytest==9.1.1
+pywin32-ctypes==0.2.3
+selenium==4.29.0
+sniffio==1.3.1
+sortedcontainers==2.4.0
+trio-websocket==0.12.2
+trio==0.35.0
+typing_extensions==4.16.0
+urllib3==2.8.0
+websocket-client==1.9.2
+wsproto==1.3.2
+yarl==1.25.1

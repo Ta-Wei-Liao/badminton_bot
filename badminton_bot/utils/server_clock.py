@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Mapping
 
+from badminton_bot.utils.errors import describe_error
+
 # 開場假設：本機與伺服器相差不超過兩秒。只有在完全沒有 NTP 估計時才這樣賭 ——
 # 實測遇過本機時鐘慢 2.65 秒的機器，那會讓第一次探測必然矛盾。見 seed_interval。
 INITIAL_INTERVAL = (-2.0, 2.0)
@@ -288,8 +290,7 @@ async def measure_server_clock(
                 t3 = time.time()
                 headers = response.headers
         except Exception as error:
-            # 用 %r：asyncio.TimeoutError 的 str() 是空字串，log 只會剩一個冒號
-            logging.warning("時鐘探測請求失敗：%r", error)
+            logging.warning("時鐘探測請求失敗：%s", describe_error(error))
             discarded_count += 1
             probe_count += 1
 

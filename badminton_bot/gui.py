@@ -46,6 +46,7 @@ from badminton_bot.services.sports_center_webservice import (
     BrowserUnavailable,
 )
 from badminton_bot.utils.timing import MAX_AUTO_CORRECTION_SECONDS, Cancelled
+from badminton_bot.utils.errors import describe_error
 
 DEV_OPEN_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEV_DAY_FORMAT = "%Y-%m-%d"
@@ -143,7 +144,7 @@ def run_grab(runner: GrabRunner, events: queue.Queue) -> None:
     except BaseException as error:
         # 不管背景執行緒怎麼結束都要回報，否則表單會永遠鎖住
         logging.exception("發生未預期的錯誤")
-        events.put(("unexpected", repr(error)))
+        events.put(("unexpected", describe_error(error)))
 
 
 def open_folder(path: Path) -> None:

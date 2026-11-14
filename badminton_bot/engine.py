@@ -29,6 +29,7 @@ from badminton_bot.services.zhongshan_sports_center_webservice import (
 from badminton_bot.services.zhongzheng_sports_center_webservice import (
     ZhongzhengSportsCenterWebService,
 )
+from badminton_bot.utils.errors import describe_error
 from badminton_bot.utils.keep_awake import keep_awake
 from badminton_bot.utils.ntp_client import query_clock_offset
 from badminton_bot.utils.server_clock import (
@@ -337,7 +338,7 @@ async def run_booking_race(
             try:
                 on_released()
             except Exception as error:
-                logging.warning("送出後的回呼失敗：%r", error)
+                logging.warning("送出後的回呼失敗：%s", describe_error(error))
 
         asyncio.get_running_loop().call_soon(_safe_on_released)
 
@@ -470,7 +471,7 @@ class GrabRunner:
         try:
             self._on_stage(stage)
         except Exception as error:
-            logging.warning("回報階段「%s」失敗：%r", stage, error)
+            logging.warning("回報階段「%s」失敗：%s", stage, describe_error(error))
 
     def _count_down(self, offset: timedelta) -> None:
         try:
