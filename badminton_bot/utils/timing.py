@@ -11,6 +11,7 @@ callers pass a one-way flight time estimated from the TCP/TLS handshake, which
 contains no application processing at all.
 """
 
+import threading
 import time
 from typing import Callable
 
@@ -22,10 +23,15 @@ SPIN_WINDOW_SECONDS = 5.0
 _COARSE_SLEEP_SECONDS = 0.2
 
 
+class Cancelled(Exception):
+    """The user cancelled the grab before any booking request was released."""
+
+
 def sleep_then_spin(
     target_epoch: float,
     spin_window: float = SPIN_WINDOW_SECONDS,
     on_tick: Callable[[float], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Block until the wall clock reaches target_epoch.
 
@@ -39,6 +45,12 @@ def sleep_then_spin(
             from sleeping to busy-waiting. Defaults to SPIN_WINDOW_SECONDS.
         on_tick (Callable[[float], None] | None, optional): called once per
             whole second of remaining time, with the seconds remaining.
+        cancel_event (threading.Event | None, optional): checked only while
+            sleeping coarsely. Inside spin_window the send is moments away and
+            the wait is not interruptible.
+
+    Raises:
+        Cancelled: cancel_event was set during the coarse sleep.
     """
     last_reported: int | None = None
 
@@ -54,7 +66,12 @@ def sleep_then_spin(
                 on_tick(remaining)
 
         if remaining > spin_window:
-            time.sleep(min(_COARSE_SLEEP_SECONDS, remaining - spin_window))
+            nap = min(_COARSE_SLEEP_SECONDS, remaining - spin_window)
+            if cancel_event is None:
+                time.sleep(nap)
+            elif cancel_event.wait(nap):
+                # 用 Event.wait 代替 time.sleep，按下取消後不必等滿這一小段才醒來
+                raise Cancelled()
 
 
 # 自動時鐘修正量的硬上限。這只是擋住荒謬值的最後一道防線，不是品質把關 ——
