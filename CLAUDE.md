@@ -14,8 +14,8 @@ Currently only Zhongzheng (five courts, 羽球7-1 to 7-5) is enabled; Zhongshan 
 
 - Do not loop, retry, or script repeated logins/bookings against the live site.
 - Space out any manual run so it resembles ordinary human use — a handful of interactions, minutes apart, not automated bursts.
-- The only place concurrent requests are legitimate is the actual booking instant (two `asyncio.gather` GETs, once, at the target time). Do not exercise that path repeatedly just to test.
-- Prefer verifying changes offline: URL construction (`_generate_booking_url`), response parsing (`_is_booking_success`), countdown maths, and input transforms are all pure functions that can be checked without touching the network. Reserve live runs for the final confirmation.
+- The only place concurrent requests are legitimate is the actual booking instant (N `asyncio.gather` GETs — one per court × hour, at most 12 — fired once, at the target time). Do not exercise that path repeatedly just to test.
+- Prefer verifying changes offline: URL construction (`_generate_booking_url`), response parsing (`_is_booking_success`), countdown maths, and booking-plan logic are all pure functions that can be checked without touching the network. Reserve live runs for the final confirmation.
 
 ## Commands
 
@@ -73,8 +73,8 @@ This split is the core design and the reason for everything else.
 `engine.py` (`GrabRunner`) orchestrates a strict schedule:
 
 - The grab instant is the **first Taipei-time midnight after the user presses 開始** (`booking_plan.next_open_at`, fixed `timezone(timedelta(hours=8))`, independent of the machine's zone). The booked day is that date plus the centre's `booking_window_days`. There is no weekday constant any more. If less than 4 minutes remain the run still proceeds but the GUI warns 「距離開搶太近，校時可能不準」.
-- `count_down(booking_date, offset=timedelta(minutes=-3))` blocks until **3 minutes before** the target, and only *then* does Selenium log in — logging in earlier risks session expiry.
-- Between login and the deadline the program measures the booking server's own clock by binary-searching its `Date` header (~8 read-only probes at random 12–25s gaps), warms two connections at T−10s, then fires. On Zhongzheng the probe target (the list page) takes 5+ seconds, so the first probe already proves the search cannot converge and it falls back to NTP after one request; a probe that fails slowly counts too, since the time waited is a lower bound on RTT. Static assets are no way round this: they are served by Cloudflare, whose `Date` is just NTP again.
+- `count_down(booking_date, offset, cancel_event)` (called by `GrabRunner._count_down` with `LOGIN_OFFSET`, i.e. −3 minutes) blocks until **3 minutes before** the target, and only *then* does Selenium log in — logging in earlier risks session expiry.
+- Between login and the deadline the program measures the booking server's own clock by binary-searching its `Date` header (~8 read-only probes at random 12–25s gaps), warms one connection per request (N) at T−10s, then fires. On Zhongzheng the probe target (the list page) takes 5+ seconds, so the first probe already proves the search cannot converge and it falls back to NTP after one request; a probe that fails slowly counts too, since the time waited is a lower bound on RTT. Static assets are no way round this: they are served by Cloudflare, whose `Date` is just NTP again.
 - `count_down` sleeps coarsely while far from its target and busy-waits only inside the last few seconds — it needs millisecond precision at the instant, but pegging a core for three minutes beforehand is not free.
 - The send instant is computed, not assumed: `nominal + θ − rtt_median/2 + margin`, where `θ` is the measured local-minus-server offset (falling back to NTP, then to zero) and `margin` deliberately biases late. Firing early is a hard failure — the server rejects a slot that has not opened — while firing late merely risks losing the race.
 - There is no manual offset prompt any more; clock correction is entirely automatic. That also means there is no human escape hatch: if NTP fails the program fires on an uncorrected clock and says so loudly in the log.
@@ -83,7 +83,7 @@ This split is the core design and the reason for everything else.
 
 **Dev mode** appears only when the environment variable `BADMINTON_BOT_DEV=1` is set; friends' builds never show it. It adds two form fields — 開搶時刻（開發）(`%Y-%m-%d %H:%M:%S`) and 預約日期（開發）(`%Y-%m-%d`) — that replace the derived open time and booking day, so you can exercise the flow without waiting for midnight. The courts and hours are picked in the normal form. Everything else — NTP sync, the server-clock probes, warm-up, and the post-booking reconnaissance — runs exactly as it does for a real grab, so dev mode is a full rehearsal rather than a partial one.
 
-That makes it **expensive and not something to run casually**: each dev run sends extra requests to the live site on top of login (on Zhongzheng about 5: one clock probe, two list-page checks, two warm-ups), and the booking GETs are the real `StepFlag=25` ones, so an available slot really will be reserved. Give the open time at least 4 minutes of runway — the clock probes need ~2.5 minutes between T−3min and T−30s to converge; a shorter window degrades to no measurement rather than failing. See the live-site constraint above.
+That makes it **expensive and not something to run casually**: each dev run sends extra requests to the live site on top of login (on Zhongzheng roughly 3 + N, N = courts × hours: one clock probe, two list-page checks, N warm-ups), and the booking GETs are N real `StepFlag=25` requests, so available slots really will be reserved. Give the open time at least 4 minutes of runway — the clock probes need ~2.5 minutes between T−3min and T−30s to converge; a shorter window degrades to no measurement rather than failing. See the live-site constraint above.
 
 ### Known risk: Cloudflare Turnstile
 
