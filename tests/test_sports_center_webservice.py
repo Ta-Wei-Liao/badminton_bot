@@ -10,7 +10,11 @@ import asyncio
 from unittest.mock import Mock
 
 import pytest
-from selenium.common.exceptions import NoAlertPresentException, NoSuchElementException
+from selenium.common.exceptions import (
+    NoAlertPresentException,
+    NoSuchElementException,
+    WebDriverException,
+)
 
 from badminton_bot.services.sports_center_webservice import (
     BROWSER_USER_AGENT,
@@ -20,10 +24,12 @@ from badminton_bot.services.sports_center_webservice import (
     SLOT_TAKEN,
     SLOT_UNKNOWN,
     BookingAttempt,
+    BrowserUnavailable,
     Court,
     SportsCenterWebService,
     WarmUpResult,
     build_browser_headers,
+    check_browser,
 )
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
@@ -978,3 +984,62 @@ class TestListPageTimeout:
             )
         assert body is None
         assert "TimeoutError" in caplog.text
+
+
+class FakeDriver:
+    """記錄呼叫的假 driver，不會真的開 Chrome。"""
+
+    def __init__(self, get_error: Exception | None = None):
+        self.get_calls: list[str] = []
+        self.quit_calls = 0
+        self._get_error = get_error
+
+    def get(self, url: str) -> None:
+        self.get_calls.append(url)
+        if self._get_error:
+            raise self._get_error
+
+    def quit(self) -> None:
+        self.quit_calls += 1
+
+
+class TestCheckBrowser:
+    def test_check_browser_quits_after_success(self, monkeypatch):
+        driver = FakeDriver()
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            lambda options=None: driver,
+        )
+        check_browser()
+        assert driver.get_calls == ["about:blank"]
+        assert driver.quit_calls == 1
+
+    def test_check_browser_never_visits_a_booking_site(self, monkeypatch):
+        driver = FakeDriver()
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            lambda options=None: driver,
+        )
+        check_browser()
+        assert set(driver.get_calls) == {"about:blank"}
+
+    def test_missing_chrome_becomes_browser_unavailable(self, monkeypatch):
+        def no_chrome(options=None):
+            raise WebDriverException("no chrome")
+
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            no_chrome,
+        )
+        with pytest.raises(BrowserUnavailable, match="Google Chrome"):
+            check_browser()
+
+    def test_quit_runs_even_when_get_fails(self, monkeypatch):
+        driver = FakeDriver(get_error=WebDriverException("boom"))
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            lambda options=None: driver,
+        )
+        with pytest.raises(BrowserUnavailable):
+            check_browser()
+        assert driver.quit_calls == 1

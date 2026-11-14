@@ -195,6 +195,46 @@ def build_browser_headers(referer: str) -> dict[str, str]:
     }
 
 
+class BrowserUnavailable(RuntimeError):
+    """本機找不到可用的 Chrome，或瀏覽器無法啟動。"""
+
+
+def build_chrome_options() -> Options:
+    """Build the headless Chrome options shared by login and the self-check."""
+    options = webdriver.ChromeOptions()
+
+    # run chrome browser without UI
+    options.add_argument("--headless")
+
+    # 模擬真實瀏覽器。必須用 --user-agent= 這個旗標，
+    # 直接丟裸字串進去 Chrome 不會當成 UA 設定。
+    options.add_argument(f"--user-agent={BROWSER_USER_AGENT}")
+
+    return options
+
+
+def check_browser() -> None:
+    """Start headless Chrome on about:blank and quit, never touching a booking site.
+
+    Raises:
+        BrowserUnavailable: Chrome cannot be started or driven.
+    """
+    driver = None
+    try:
+        driver = webdriver.Chrome(options=build_chrome_options())
+        driver.get("about:blank")
+    except Exception as exc:
+        raise BrowserUnavailable(
+            "找不到可用的 Google Chrome，請先安裝 Chrome 並確認網路連線"
+        ) from exc
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                logging.warning("關閉自我檢查用的瀏覽器失敗")
+
+
 class SportsCenterWebService(ABC):
     sport_center_name: str
     login_page_url: str
@@ -237,16 +277,7 @@ class SportsCenterWebService(ABC):
         Returns:
             Options: Chrome options object
         """
-        options = webdriver.ChromeOptions()
-
-        # run chrome browser without UI
-        options.add_argument("--headless")
-
-        # 模擬真實瀏覽器。必須用 --user-agent= 這個旗標，
-        # 直接丟裸字串進去 Chrome 不會當成 UA 設定。
-        options.add_argument(f"--user-agent={BROWSER_USER_AGENT}")
-
-        return options
+        return build_chrome_options()
 
     def __del__(self) -> None:
         # 瀏覽器有可能還沒開起來就失敗，這時不需要（也無法）關閉，
