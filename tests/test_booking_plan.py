@@ -8,6 +8,7 @@ from badminton_bot.booking_plan import (
     TAIPEI,
     BookingTarget,
     booking_day,
+    describe_schedule,
     expand_targets,
     next_open_at,
     summarize,
@@ -105,3 +106,14 @@ def test_summary_text_names_both_dates():
     assert "已選 2 片 × 3 時段 ＝ 6 個請求（上限 12）" in s.text
     assert "11/19（四）00:00" in s.text
     assert "11/26（四）" in s.text
+
+
+def test_describe_schedule_names_open_time_and_booking_day():
+    assert (
+        describe_schedule(datetime(2026, 11, 19, tzinfo=T), date(2026, 11, 26))
+        == "將於 11/19（四）00:00 開搶，預約 11/26（四）的場地"
+    )
+    # 開發模式的開搶時刻可以帶秒數
+    assert describe_schedule(
+        datetime(2026, 11, 14, 13, 5, 30, tzinfo=T), date(2026, 11, 14)
+    ).startswith("將於 11/14（六）13:05:30 開搶")

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import queue
+import threading
 from datetime import datetime, timedelta
 
 from badminton_bot.booking_plan import TAIPEI
@@ -12,9 +13,28 @@ from badminton_bot.gui import (
     format_remaining,
     is_dev_mode,
     results_grid,
+    run_grab,
+    stage_reporter,
 )
 from badminton_bot.services.sports_center_webservice import BookingAttempt
 from tests.conftest import FakeService, make_targets
+
+
+def make_config() -> GrabConfig:
+    return GrabConfig(
+        service_cls=FakeService,
+        username="A123456789",
+        password="s3cret",
+        open_at=datetime.now(TAIPEI) + timedelta(seconds=2),
+        targets=make_targets(),
+    )
+
+
+def drain(events: queue.Queue) -> list:
+    items = []
+    while not events.empty():
+        items.append(events.get_nowait())
+    return items
 
 
 def make_attempt(court_name: str, hour: int, success: bool | None) -> BookingAttempt:
@@ -61,16 +81,8 @@ def test_remaining_time_gets_coarser_the_further_away_it_is():
 def test_queue_handler_never_receives_the_password(tmp_path, offline_engine):
     messages: queue.Queue[str] = queue.Queue()
     log_path = set_logger(tmp_path, extra_handlers=[QueueLogHandler(messages)])
-    config = GrabConfig(
-        service_cls=FakeService,
-        username="A123456789",
-        password="s3cret",
-        open_at=datetime.now(TAIPEI) + timedelta(seconds=2),
-        targets=make_targets(),
-    )
-
     try:
-        attempts = asyncio.run(GrabRunner(config).run())
+        attempts = asyncio.run(GrabRunner(make_config()).run())
     finally:
         for handler in logging.getLogger().handlers:
             handler.flush()
@@ -83,3 +95,39 @@ def test_queue_handler_never_receives_the_password(tmp_path, offline_engine):
     assert received
     assert all("s3cret" not in message for message in received)
     assert "s3cret" not in log_path.read_text(encoding="utf-8")
+
+
+def test_stage_reporter_only_enqueues():
+    """背景執行緒絕不能碰 Tk：回呼裡只握著 queue，沒有任何視窗物件。"""
+    events: queue.Queue = queue.Queue()
+    report = stage_reporter(events)
+
+    report("等待登入")
+
+    assert drain(events) == [("stage", "等待登入")]
+    assert [cell.cell_contents for cell in report.__closure__] == [events]
+
+
+def test_run_grab_delivers_stages_and_outcome_through_the_queue(offline_engine):
+    events: queue.Queue = queue.Queue()
+    runner = GrabRunner(make_config(), on_stage=stage_reporter(events))
+
+    worker = threading.Thread(target=run_grab, args=(runner, events))
+    worker.start()
+    worker.join(timeout=30)
+
+    items = drain(events)
+    assert items[0] == ("stage", "瀏覽器自我檢查")
+    assert ("stage", "已送出，等待回應") in items
+    kind, attempts = items[-1]
+    assert kind == "done" and len(attempts) == 4
+
+
+def test_run_grab_reports_a_cancel_as_cancelled(offline_engine):
+    events: queue.Queue = queue.Queue()
+    runner = GrabRunner(make_config(), on_stage=stage_reporter(events))
+    runner.cancel()
+
+    run_grab(runner, events)
+
+    assert drain(events)[-1] == ("cancelled", None)

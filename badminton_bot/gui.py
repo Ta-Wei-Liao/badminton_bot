@@ -1,8 +1,8 @@
 """The tkinter window: the form, the running view and the results table.
 
 Tk owns the main thread. The grab runs in a daemon thread with its own event
-loop; stages and the final outcome come back through root.after, log lines
-through a queue the window polls.
+loop and never touches a Tk object: stages, the outcome and log lines all go
+into queues that the main thread drains with root.after.
 """
 
 import asyncio
@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -25,6 +25,8 @@ from badminton_bot.booking_plan import (
     TAIPEI,
     TOO_CLOSE,
     booking_day,
+    describe_schedule,
+    describe_selection,
     expand_targets,
     next_open_at,
     summarize,
@@ -91,6 +93,28 @@ def format_remaining(seconds: float) -> str:
     return f"{secs} 秒"
 
 
+def stage_reporter(events: queue.Queue) -> Callable[[str], None]:
+    """The on_stage callback handed to the engine: it only enqueues, never touches Tk."""
+
+    def report(stage: str) -> None:
+        events.put(("stage", stage))
+
+    return report
+
+
+def run_grab(runner: GrabRunner, events: queue.Queue) -> None:
+    """Worker-thread body: run the grab and enqueue its outcome. Never touches Tk."""
+    try:
+        events.put(("done", asyncio.run(runner.run())))
+    except Cancelled:
+        events.put(("cancelled", None))
+    except (BrowserUnavailable, LoginFailed) as error:
+        events.put(("error", str(error)))
+    except Exception as error:
+        logging.exception("發生未預期的錯誤")
+        events.put(("unexpected", repr(error)))
+
+
 def open_folder(path: Path) -> None:
     if sys.platform == "win32":
         os.startfile(path)  # type: ignore[attr-defined]
@@ -107,6 +131,8 @@ class App:
         self.center = next(o for o in CENTER_OPTIONS if o.enabled)
         self.courts = self.center.service_cls.courts
         self.messages: queue.Queue[str] = queue.Queue()
+        # 背景執行緒只往這裡丟 (種類, 內容)，由主執行緒取出處理
+        self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.runner: GrabRunner | None = None
         self.open_at: datetime | None = None
         self.stage = ""
@@ -119,7 +145,7 @@ class App:
         self._build_run_view()
         self._refresh()
         self._tick()
-        self._poll_log()
+        self._poll()
 
     # ---- 畫面 ----
 
@@ -254,10 +280,10 @@ class App:
             else:
                 warning = "距離開搶太近，校時可能不準" if open_at - now < TOO_CLOSE else None
                 if can_start:
-                    text = (
-                        f"{text.split('｜')[0]}｜開發模式：將於 {open_at:%m/%d %H:%M:%S} "
-                        f"開搶，預約 {day:%m/%d} 的場地"
+                    selection = describe_selection(
+                        len(self._selected_courts()), len(self._selected_hours())
                     )
+                    text = f"{selection}｜開發模式：{describe_schedule(open_at, day)}"
         self.summary.configure(text=text)
         self.warning.configure(text=warning or "")
         self.start_button.configure(state="normal" if can_start else "disabled")
@@ -309,31 +335,11 @@ class App:
         self.log_text.configure(state="disabled")
         self.open_at = open_at
         self.stage = ""
-        self.runner = GrabRunner(config, on_stage=self._post_stage)
+        self.runner = GrabRunner(config, on_stage=stage_reporter(self.events))
         self._set_form_state(locked=True)
-        threading.Thread(target=self._work, args=(self.runner,), daemon=True).start()
-
-    def _post(self, callback, *args) -> None:
-        """Hand a call to the Tk thread; a window already gone has no one to tell."""
-        try:
-            self.root.after(0, callback, *args)
-        except (RuntimeError, tk.TclError):
-            pass
-
-    def _post_stage(self, stage: str) -> None:
-        self._post(self._on_stage, stage)
-
-    def _work(self, runner: GrabRunner) -> None:
-        try:
-            outcome = ("done", asyncio.run(runner.run()))
-        except Cancelled:
-            outcome = ("cancelled", None)
-        except (BrowserUnavailable, LoginFailed) as error:
-            outcome = ("error", str(error))
-        except Exception as error:
-            logging.exception("發生未預期的錯誤")
-            outcome = ("unexpected", repr(error))
-        self._post(self._on_finished, *outcome)
+        threading.Thread(
+            target=run_grab, args=(self.runner, self.events), daemon=True
+        ).start()
 
     def _on_stage(self, stage: str) -> None:
         self.stage = stage
@@ -413,10 +419,21 @@ class App:
             self._update_status()
         self.root.after(1000, self._tick)
 
-    def _poll_log(self) -> None:
+    def _poll(self) -> None:
+        while True:
+            try:
+                kind, payload = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "stage":
+                self._on_stage(payload)
+            else:
+                self._on_finished(kind, payload)
+                if self.closing:
+                    return  # 視窗已關閉，不再排下一輪
         if not self._in_quiet_window():
             self._drain_log()
-        self.root.after(100, self._poll_log)
+        self.root.after(100, self._poll)
 
     def _drain_log(self) -> None:
         lines = []

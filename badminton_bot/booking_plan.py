@@ -64,6 +64,19 @@ def _fmt(d: date | datetime) -> str:
     return f"{d.month:02d}/{d.day:02d}（{_WEEKDAYS[d.weekday()]}）"
 
 
+def describe_selection(court_count: int, hour_count: int) -> str:
+    """「已選 N 片 × M 時段 ＝ K 個請求（上限 12）」."""
+    count = court_count * hour_count
+    return f"已選 {court_count} 片 × {hour_count} 時段 ＝ {count} 個請求（上限 {MAX_REQUESTS}）"
+
+
+def describe_schedule(open_at: datetime, day: date) -> str:
+    """「將於 11/19（四）00:00 開搶，預約 11/26（四）的場地」; seconds only when non-zero."""
+    local = open_at.astimezone(TAIPEI)
+    clock = f"{local:%H:%M:%S}" if local.second else f"{local:%H:%M}"
+    return f"將於 {_fmt(local)}{clock} 開搶，預約 {_fmt(day)}的場地"
+
+
 def summarize(
     now: datetime,
     courts: Sequence[Court],
@@ -85,7 +98,7 @@ def summarize(
             warning,
         )
     text = (
-        f"已選 {len(courts)} 片 × {len(hours)} 時段 ＝ {count} 個請求（上限 {MAX_REQUESTS}）"
-        f"｜將於 {_fmt(open_at)}00:00 開搶，預約 {_fmt(booking_day(open_at, window_days))}的場地"
+        f"{describe_selection(len(courts), len(hours))}"
+        f"｜{describe_schedule(open_at, booking_day(open_at, window_days))}"
     )
     return SelectionSummary(text, True, warning)
