@@ -224,6 +224,8 @@ def check_browser() -> None:
         driver = webdriver.Chrome(options=build_chrome_options())
         driver.get("about:blank")
     except Exception as exc:
+        # 給使用者看的訊息只有一句話，真正的原因（版本不符、權限…）要留在 log 裡
+        logging.exception("瀏覽器自我檢查失敗")
         raise BrowserUnavailable(
             "找不到可用的 Google Chrome，請先安裝 Chrome 並確認網路連線"
         ) from exc
@@ -289,19 +291,31 @@ class SportsCenterWebService(ABC):
 
         self._driver = None
         logging.info("關閉瀏覽器")
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            # 搶完之後才在收尾時拋出，會把搶場地的結果蓋掉
+            logging.warning("關閉瀏覽器失敗", exc_info=True)
 
     def __del__(self) -> None:
         self._quit_driver()
 
     def __enter__(self):
-        self.login()
+        # __enter__ 拋出時 __exit__ 不會被呼叫，Chrome 得在這裡關
+        try:
+            self.login()
+        except BaseException:
+            self._quit_driver()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         # 離開時一定關掉 Chrome，不能等垃圾回收：取消時 traceback 會讓物件多活一陣子
         try:
             self.logout()
+        except Exception:
+            # 登出失敗不能往外拋：搶完之後拋出來會蓋掉搶場地的結果（或取消）
+            logging.warning("登出失敗", exc_info=True)
         finally:
             self._quit_driver()
 
@@ -316,6 +330,20 @@ class SportsCenterWebService(ABC):
 
             return
 
+        # 登入途中任何失敗（提醒視窗沒出現、找不到元素…）都當成沒登入：
+        # 讓引擎拋 LoginFailed，並由 __exit__ 照常關掉 Chrome
+        try:
+            self.__is_login = self._submit_login()
+        except Exception:
+            logging.exception("登入過程發生錯誤，視為登入失敗")
+            self.__is_login = False
+
+    def _submit_login(self) -> bool:
+        """Dismiss the reminders, fill in the form and submit it.
+
+        Returns:
+            bool: whether the site greeted us as logged in.
+        """
         # 兩個提醒視窗是頁面載入完才跳出來的（實測約 0.5 ~ 1 秒），所以要輪詢等待。
         # 不能用 lambda d: d.switch_to.alert，WebDriverWait 預設只忽略 NoSuchElementException，
         # alert 還沒跳出時丟的 NoAlertPresentException 會直接往外拋，等於只看了一次就放棄。
@@ -347,12 +375,13 @@ class SportsCenterWebService(ABC):
             welcome_message = self._wait_for_element(
                 self._get_login_user_name_from_website
             )
-            self.__is_login = True
-            logging.info("%s 登入成功!", welcome_message.text)
         except Exception:
             login_fail_element = self._get_login_failed_message()
             logging.error("%s", login_fail_element.text)
-            self.__is_login = False
+            return False
+
+        logging.info("%s 登入成功!", welcome_message.text)
+        return True
 
     def _wait_for_element(
         self,

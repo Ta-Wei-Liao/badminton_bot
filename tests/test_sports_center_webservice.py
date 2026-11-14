@@ -1088,13 +1088,136 @@ class TestContextExitClosesChrome:
         service.__del__()
         assert driver.quit_calls == 1
 
-    def test_quits_the_driver_even_when_logout_fails(self):
+    def test_quits_the_driver_even_when_logout_fails(self, caplog):
+        """登出失敗只記警告：搶完之後拋出來會把搶場地的結果蓋掉。"""
         driver = _CountingDriver()
         service = self._service(driver)
         service.logout = Mock(side_effect=WebDriverException("登出鈕不見了"))
 
-        with pytest.raises(WebDriverException):
+        with caplog.at_level("WARNING"):
             with service:
                 pass
 
         assert driver.quit_calls == 1
+        assert "登出鈕不見了" in caplog.text
+
+    def test_a_logout_failure_does_not_replace_the_body_error(self):
+        driver = _CountingDriver()
+        service = self._service(driver)
+        service.logout = Mock(side_effect=WebDriverException("登出鈕不見了"))
+
+        with pytest.raises(RuntimeError, match="模擬中途出錯"):
+            with service:
+                raise RuntimeError("模擬中途出錯")
+
+        assert driver.quit_calls == 1
+
+    def test_quits_the_driver_when_login_raises(self):
+        """__enter__ 拋出時 __exit__ 不會被呼叫，Chrome 也得當場關掉。"""
+        driver = _CountingDriver()
+        service = self._service(driver)
+
+        def broken_login():
+            raise RuntimeError("模擬登入中途出錯")
+
+        service.login = broken_login
+
+        with pytest.raises(RuntimeError):
+            with service:
+                pass
+
+        assert driver.quit_calls == 1
+
+
+class TestCheckBrowserLogsTheCause:
+    def test_the_underlying_error_reaches_the_log(self, monkeypatch, caplog):
+        def no_chrome(options=None):
+            raise WebDriverException("chromedriver 版本不符 v135")
+
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            no_chrome,
+        )
+        with caplog.at_level("ERROR"):
+            with pytest.raises(BrowserUnavailable):
+                check_browser()
+
+        assert "瀏覽器自我檢查失敗" in caplog.text
+        assert "chromedriver 版本不符 v135" in caplog.text
+
+
+class _NoAlertDriver(_FakeDriver):
+    """登入頁的提醒視窗永遠不出現。"""
+
+    def _poll_for_alert(self):
+        raise NoAlertPresentException("no such alert")
+
+
+class _SubmitFailsDriver(_FakeDriver):
+    """DoSubmit 之後既沒有歡迎訊息，也沒有錯誤訊息元素。"""
+
+    def find_element(self, by, value):
+        if value in ("//span[@id='lab_Name']", "showerror3"):
+            raise NoSuchElementException(f"no such element: {value}")
+        return super().find_element(by, value)
+
+
+class TestLoginFailureIsNotAnException:
+    """登入途中任何失敗都當成「沒登入」，讓引擎拋 LoginFailed、__exit__ 關 Chrome。"""
+
+    @staticmethod
+    def _build(driver):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        service._driver = driver
+        service._SportsCenterWebService__is_login = False
+        service._SportsCenterWebService__username = "A123456789"
+        service._SportsCenterWebService__password = "secret"
+        return service
+
+    def test_an_alert_that_never_appears_means_not_logged_in(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.LOGIN_WAIT_SECONDS", 0.2
+        )
+        service = self._build(
+            _NoAlertDriver(alert_texts=("這只是提醒！！！", "報名運動課程請使用個人帳密報名繳費"))
+        )
+
+        with caplog.at_level("ERROR"):
+            service.login()
+
+        assert service.login_status is False
+        assert "TimeoutException" in caplog.text
+        assert "secret" not in caplog.text
+        service._quit_driver()  # 不留給 __del__，免得測試結束後才冒出一行 log
+
+    def test_a_missing_error_element_means_not_logged_in(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.LOGIN_WAIT_SECONDS", 0.2
+        )
+        service = self._build(
+            _SubmitFailsDriver(alert_texts=("這只是提醒！！！", "報名運動課程請使用個人帳密報名繳費"))
+        )
+
+        with caplog.at_level("ERROR"):
+            service.login()
+
+        assert service.login_status is False
+        assert "NoSuchElementException" in caplog.text
+        assert "secret" not in caplog.text
+        service._quit_driver()  # 不留給 __del__，免得測試結束後才冒出一行 log
+
+
+class TestQuitFailureNeverHidesTheOutcome:
+    def test_a_failing_quit_is_only_logged(self, caplog):
+        class BrokenQuitDriver:
+            def quit(self):
+                raise WebDriverException("chromedriver 已經不見了")
+
+        service = TestContextExitClosesChrome._service(BrokenQuitDriver())
+
+        with caplog.at_level("WARNING"):
+            with service:
+                pass
+
+        assert "chromedriver 已經不見了" in caplog.text
+        assert service._driver is None
