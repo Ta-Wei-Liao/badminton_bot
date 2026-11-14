@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import ssl
 import statistics
 import time
 from abc import ABC, abstractmethod
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import aiohttp
+import certifi
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.remote.webelement import WebElement
@@ -166,6 +168,17 @@ BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
 )
+
+
+def build_tls_context() -> ssl.SSLContext:
+    """Build a TLS context that verifies the site's certificate against certifi.
+
+    Returns:
+        ssl.SSLContext: verifies both the certificate chain and the hostname.
+    """
+    # 連線帶著登入 cookie，不驗憑證的話同網段（例如公共 Wi-Fi）的人就能冒充網站偷走它。
+    # 用 certifi 自帶的清單，而不是系統預設路徑：打包版在球友電腦上不一定找得到後者。
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 def build_browser_headers(referer: str) -> dict[str, str]:
@@ -499,7 +512,7 @@ class SportsCenterWebService(ABC):
             limit=CONNECTION_LIMIT,
             ttl_dns_cache=DNS_CACHE_SECONDS,
             keepalive_timeout=KEEPALIVE_TIMEOUT_SECONDS,
-            ssl=False,
+            ssl=build_tls_context(),
         )
 
         return aiohttp.ClientSession(
