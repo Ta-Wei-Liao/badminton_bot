@@ -3,14 +3,20 @@
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 
-from .sports_center_webservice import SportsCenterWebService
+from .sports_center_webservice import Court, SportsCenterWebService
 
 
 class ZhongzhengSportsCenterWebService(SportsCenterWebService):
     sport_center_name = "中正運動中心"
     login_page_url = "https://bwd.xuanen.com.tw/wd27.aspx?module=login_page&files=login"
     booking_window_days = 7
-    target_qpid = 1199  # 羽球 7-4。換場地只要改這一行。
+    courts = (
+        Court("羽球7-1", 1196),
+        Court("羽球7-2", 1197),
+        Court("羽球7-3", 1198),
+        Court("羽球7-4", 1199),
+        Court("羽球7-5", 1200),
+    )
 
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
@@ -42,12 +48,25 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
         else:
             return False
 
-    def _static_asset_urls(self) -> tuple[str, str]:
-        # 列表頁就是用這兩張圖標示可訂／已訂，所以它們確實存在於站上。
+    def _static_asset_urls(self) -> tuple[str, ...]:
+        # 2026-11-14 從列表頁 HTML 讀出的 15 個靜態資源，每條預熱連線各抓一個。
         # 預熱只需要連線建立起來 —— 就算路徑變了拿到 404，連線一樣是熱的。
         return (
             "https://bwd.xuanen.com.tw/img/place01.png",
             "https://bwd.xuanen.com.tw/img/place02.png",
+            "https://bwd.xuanen.com.tw/img/LOGO/logo_wd27.png",
+            "https://bwd.xuanen.com.tw/css/layout.css",
+            "https://bwd.xuanen.com.tw/css/funtitle.css",
+            "https://bwd.xuanen.com.tw/css/csspin/csspin.css",
+            "https://bwd.xuanen.com.tw/js/tablesorter/style.css",
+            "https://bwd.xuanen.com.tw/script/jquery-ui.min.css",
+            "https://bwd.xuanen.com.tw/script/jquery.layout-1.4.3.css",
+            "https://bwd.xuanen.com.tw/Scripts/sweetalert2.min.css",
+            "https://bwd.xuanen.com.tw/Scripts/sweetalert2.all.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery-3.6.0.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery-migrate-3.4.1.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery-ui-1.13.0.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery.layout-1.4.3.js",
         )
 
     def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
@@ -58,11 +77,13 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
             f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
         )
 
-    def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
+    def _generate_booking_url(
+        self, year: int, month: int, day: int, hour: int, qpid: int
+    ) -> str:
         # 產生搶場地 url。中正的 QTime 不補零
         return (
             f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking"
-            f"&files=booking_place&StepFlag=25&QPid={type(self).target_qpid}"
+            f"&files=booking_place&StepFlag=25&QPid={qpid}"
             f"&QTime={str(hour)}&PT=1"
             f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
         )

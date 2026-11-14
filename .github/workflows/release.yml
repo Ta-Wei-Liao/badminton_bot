@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 視窗標題顯示的是 __version__，忘了改就會發出一個版本號對不上的 release
+      - name: Check tag matches __version__
+        shell: bash
+        run: |
+          version=$(python -c "import badminton_bot; print(badminton_bot.__version__)" | tr -d '\r')
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::標籤 ${GITHUB_REF_NAME} 與 badminton_bot.__version__（${version}）不符"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Test
+        run: pytest
+
+      - name: Build
+        run: pyinstaller badminton_bot/main.py --name BadmintonBot --windowed --paths . --collect-all selenium -y
+
+      # 關掉 App Nap（縮小或被蓋住時計時器會被合併，送出時間會飄），
+      # 改了 Info.plist 之後要重新 ad-hoc 簽章，否則 Apple Silicon 不讓它執行
+      - name: Disable App Nap and re-sign (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          plutil -replace NSAppSleepDisabled -bool YES dist/BadmintonBot.app/Contents/Info.plist
+          codesign --force --deep --sign - dist/BadmintonBot.app
+          codesign --verify --deep --strict dist/BadmintonBot.app
+
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/BadmintonBot.app BadmintonBot-macOS.zip
+
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/BadmintonBot -DestinationPath BadmintonBot-Windows.zip
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: BadmintonBot-*.zip
+          body: |
+            使用說明請見 [README](https://github.com/Ta-Wei-Liao/badminton_bot#readme)。
+            第一次開啟會被系統擋下（未簽章），README 內有放行步驟。

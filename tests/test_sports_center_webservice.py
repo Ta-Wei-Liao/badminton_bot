@@ -10,7 +10,11 @@ import asyncio
 from unittest.mock import Mock
 
 import pytest
-from selenium.common.exceptions import NoAlertPresentException, NoSuchElementException
+from selenium.common.exceptions import (
+    NoAlertPresentException,
+    NoSuchElementException,
+    WebDriverException,
+)
 
 from badminton_bot.services.sports_center_webservice import (
     BROWSER_USER_AGENT,
@@ -20,9 +24,12 @@ from badminton_bot.services.sports_center_webservice import (
     SLOT_TAKEN,
     SLOT_UNKNOWN,
     BookingAttempt,
+    BrowserUnavailable,
+    Court,
     SportsCenterWebService,
     WarmUpResult,
     build_browser_headers,
+    check_browser,
 )
 from badminton_bot.services.zhongshan_sports_center_webservice import (
     ZhongshanSportsCenterWebService,
@@ -46,7 +53,7 @@ class TestSubclassContract:
             "sport_center_name",
             "login_page_url",
             "booking_window_days",
-            "target_qpid",
+            "courts",
         ):
             assert attr in service_cls.__dict__
 
@@ -66,7 +73,7 @@ class TestSubclassContract:
 class TestGenerateBookingUrl:
     def test_zhongshan_zero_pads_the_hour(self):
         url = build_without_browser(ZhongshanSportsCenterWebService)._generate_booking_url(
-            year=2025, month=4, day=12, hour=9
+            year=2025, month=4, day=12, hour=9, qpid=84
         )
         assert "QTime=09" in url
         assert "D=2025/04/12" in url
@@ -74,7 +81,7 @@ class TestGenerateBookingUrl:
 
     def test_zhongzheng_does_not_zero_pad_the_hour(self):
         url = build_without_browser(ZhongzhengSportsCenterWebService)._generate_booking_url(
-            year=2025, month=4, day=12, hour=9
+            year=2025, month=4, day=12, hour=9, qpid=84
         )
         assert "QTime=9" in url
         assert "QTime=09" not in url
@@ -86,15 +93,16 @@ class TestGenerateBookingUrl:
         [(ZhongshanSportsCenterWebService, "QPid=84"), (ZhongzhengSportsCenterWebService, "QPid=1199")],
     )
     def test_each_center_targets_its_own_venue_id(self, service_cls, expected_qpid):
+        qpid = int(expected_qpid.removeprefix("QPid="))
         url = build_without_browser(service_cls)._generate_booking_url(
-            year=2025, month=4, day=12, hour=20
+            year=2025, month=4, day=12, hour=20, qpid=qpid
         )
         assert expected_qpid in url
 
     @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
     def test_month_and_day_are_always_zero_padded(self, service_cls):
         url = build_without_browser(service_cls)._generate_booking_url(
-            year=2025, month=12, day=5, hour=20
+            year=2025, month=12, day=5, hour=20, qpid=84
         )
         assert "D=2025/12/05" in url
 
@@ -281,25 +289,36 @@ class TestLoginWaitsForDelayedElements:
         assert "DoSubmit()" in service._driver.executed_scripts
 
 
-class TestTargetQpidContract:
-    def test_both_centres_declare_their_target_court(self):
-        assert ZhongzhengSportsCenterWebService.target_qpid == 1199
-        assert ZhongshanSportsCenterWebService.target_qpid == 84
+class TestCourtsContract:
+    def test_zhongshan_offers_its_single_court(self):
+        assert ZhongshanSportsCenterWebService.courts == (Court("中山羽球場", 84),)
 
-    def test_a_subclass_without_target_qpid_is_rejected_at_import_time(self):
+    def test_zhongzheng_offers_exactly_the_five_7_courts(self):
+        assert ZhongzhengSportsCenterWebService.courts == (
+            Court("羽球7-1", 1196),
+            Court("羽球7-2", 1197),
+            Court("羽球7-3", 1198),
+            Court("羽球7-4", 1199),
+            Court("羽球7-5", 1200),
+        )
+
+    def test_a_subclass_without_courts_is_rejected_at_import_time(self):
         """__init_subclass__ 在類別定義時就擋下來，而不是等到執行期才炸。"""
-        with pytest.raises(TypeError, match="target_qpid"):
+        with pytest.raises(TypeError, match="courts"):
 
             class Incomplete(SportsCenterWebService):
                 sport_center_name = "測試中心"
                 login_page_url = "https://example.invalid/login"
                 booking_window_days = 7
 
-    def test_the_booking_url_is_built_from_the_class_attribute(self):
-        """換場地應該只要改 target_qpid 一行。"""
+    def test_booking_url_uses_the_qpid_it_is_given(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        url = service._generate_booking_url(year=2026, month=9, day=17, hour=20)
-        assert f"QPid={ZhongzhengSportsCenterWebService.target_qpid}" in url
+        url = service._generate_booking_url(
+            year=2026, month=11, day=26, hour=20, qpid=1197
+        )
+        assert "QPid=1197&QTime=20&" in url
+        assert "StepFlag=25" in url
+        assert "D=2026/11/26" in url
 
 
 class TestListPageUrl:
@@ -329,17 +348,44 @@ class TestListPageUrl:
 
 
 class TestWarmUpUrls:
+    def test_warms_one_distinct_asset_per_request(self):
+        urls = build_without_browser(
+            ZhongzhengSportsCenterWebService
+        )._generate_warm_up_urls(count=12)
+        assert len(urls) == 12 and len(set(urls)) == 12
+        assert all(
+            u.startswith("https://bwd.xuanen.com.tw/") and "StepFlag" not in u
+            for u in urls
+        )
+
+    def test_never_warms_fewer_than_two(self):
+        urls = build_without_browser(
+            ZhongzhengSportsCenterWebService
+        )._generate_warm_up_urls(count=1)
+        assert len(urls) == 2
+
+    def test_caps_at_the_assets_available(self):
+        urls = build_without_browser(
+            ZhongshanSportsCenterWebService
+        )._generate_warm_up_urls(count=12)
+        assert len(urls) == 2
+
+    def test_pool_can_hold_every_request_at_once(self):
+        from badminton_bot.services.sports_center_webservice import CONNECTION_LIMIT
+
+        assert CONNECTION_LIMIT > 12
+
     def test_warms_two_different_pages(self):
         """兩條熱連線供兩個預約請求各用一條；兩個不同頁面併發載入是一般瀏覽行為。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        urls = service._generate_warm_up_urls()
+        urls = service._generate_warm_up_urls(count=2)
         assert len(urls) == 2
         assert len(set(urls)) == 2
 
     def test_warm_up_never_touches_the_booking_action(self):
         for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
             service = build_without_browser(cls)
-            for url in service._generate_warm_up_urls():
+            for url in service._generate_warm_up_urls(count=2):
                 assert "StepFlag=25" not in url
 
 
@@ -363,51 +409,58 @@ LIST_PAGE_HTML_PADDED_HOUR = """
 
 
 class TestParseSlotState:
+    def test_slot_state_is_looked_up_per_court(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        html = "Step3Action(1196,20) Step3Action(1199,21)"
+        assert service.parse_slot_state(html, hour=20, qpid=1196) == SLOT_AVAILABLE
+        assert service.parse_slot_state(html, hour=20, qpid=1199) == SLOT_TAKEN
+        assert service.parse_slot_state(html, hour=20, qpid=1200) == SLOT_UNKNOWN
+
     def test_an_open_slot_is_reported_available(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state(LIST_PAGE_HTML, hour=19) == SLOT_AVAILABLE
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=19, qpid=1199) == SLOT_AVAILABLE
 
     def test_a_slot_without_its_click_handler_is_reported_taken(self):
         """20:00 那格的 Step3Action 呼叫不見了 —— 被別人訂走了。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20, qpid=1199) == SLOT_TAKEN
 
     def test_another_court_at_the_same_hour_does_not_count(self):
         """1196 的 20:00 還空著，但我們要的是 1199。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20, qpid=1199) == SLOT_TAKEN
 
     def test_a_page_that_never_mentions_our_court_is_unknown(self):
         """預約窗口還沒開時列表頁可能根本不渲染那一天 —— 那是未知，不是已訂。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state("<html>查無資料</html>", hour=20) == SLOT_UNKNOWN
+        assert service.parse_slot_state("<html>查無資料</html>", hour=20, qpid=1199) == SLOT_UNKNOWN
 
     def test_tolerates_a_zero_padded_hour(self):
         """中山的 QTime 補零、中正不補，解析不該依賴這個差異。"""
         service = build_without_browser(ZhongshanSportsCenterWebService)
         assert (
-            service.parse_slot_state(LIST_PAGE_HTML_PADDED_HOUR, hour=9)
+            service.parse_slot_state(LIST_PAGE_HTML_PADDED_HOUR, hour=9, qpid=84)
             == SLOT_AVAILABLE
         )
 
     def test_tolerates_whitespace_in_the_call(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         html = '<a onclick="Step3Action( 1199 , 20 )">'
-        assert service.parse_slot_state(html, hour=20) == SLOT_AVAILABLE
+        assert service.parse_slot_state(html, hour=20, qpid=1199) == SLOT_AVAILABLE
 
     def test_incidental_substring_in_unrelated_content_does_not_trigger_taken(self):
         """中山的 QPid=84 太短，很容易在圖檔名裡撞到（place0841.png）。
         那不代表我們的場地被預約了 —— 只是巧合的字串。不該謊報成已訂。"""
         service = build_without_browser(ZhongshanSportsCenterWebService)
         html = '<img src="img/place0841.png">'
-        assert service.parse_slot_state(html, hour=20) == SLOT_UNKNOWN
+        assert service.parse_slot_state(html, hour=20, qpid=84) == SLOT_UNKNOWN
 
     def test_our_court_at_another_hour_reads_as_taken(self):
         """我們的場地確實出現在頁面上（Step3Action 呼叫），只是不在我們查詢的時段。
         那表示那個時段已經被訂走了。"""
         service = build_without_browser(ZhongshanSportsCenterWebService)
         html = '<a onclick="Step3Action(84, 19)"><img src="img/place01.png"></a>'
-        assert service.parse_slot_state(html, hour=20) == SLOT_TAKEN
+        assert service.parse_slot_state(html, hour=20, qpid=84) == SLOT_TAKEN
 
 
 class TestBrowserHeaders:
@@ -498,6 +551,9 @@ class RecordingSession:
         return FakeBookingResponse(self.body, self.headers)
 
 
+COURT = Court("羽球7-4", 1199)
+
+
 class TestBookingCourts:
     def test_sends_the_url_it_was_handed(self):
         """URL 在截止時刻之前就組好，開搶那一刻不做字串運算。"""
@@ -512,12 +568,31 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
         assert session.requested_urls == ["https://example.invalid/book"]
         assert attempt.success is True
         assert attempt.hour == 20
+
+    def test_booking_attempt_carries_the_court(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession()
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+                court=Court("羽球7-2", 1197),
+            )
+
+        attempt = asyncio.run(scenario())
+        assert (attempt.court_name, attempt.qpid) == ("羽球7-2", 1197)
 
     def test_waits_for_the_event_before_sending(self):
         """task 要在倒數結束前就掛好，時間到只做 event.set()。"""
@@ -532,6 +607,7 @@ class TestBookingCourts:
                     booking_url="https://example.invalid/book",
                     hour=20,
                     ready_event=ready,
+                    court=COURT,
                 )
             )
             await asyncio.sleep(0.05)
@@ -554,6 +630,7 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
@@ -573,6 +650,7 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
@@ -591,6 +669,7 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
@@ -607,7 +686,7 @@ class TestWarmUp:
         )
 
         results = asyncio.run(
-            service.warm_up(session=session)
+            service.warm_up(session=session, count=2)
         )
         assert len(results) == 2
         assert len(session.requested_urls) == 2
@@ -622,7 +701,7 @@ class TestWarmUp:
         )
 
         results = asyncio.run(
-            service.warm_up(session=session)
+            service.warm_up(session=session, count=2)
         )
         assert results[0].connection == "close"
         assert results[0].keep_alive == "timeout=5"
@@ -666,7 +745,7 @@ class TestWarmUp:
 
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         results = asyncio.run(
-            service.warm_up(session=ExplodingSession())
+            service.warm_up(session=ExplodingSession(), count=2)
         )
         assert all(result.ok is False for result in results)
 
@@ -807,19 +886,19 @@ class TestStaticAssetWarmUp:
     def test_warm_up_urls_are_two_distinct_static_assets(self):
         for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
             service = build_without_browser(cls)
-            urls = service._generate_warm_up_urls()
+            urls = service._generate_warm_up_urls(count=2)
             assert len(urls) == 2
             assert len(set(urls)) == 2
 
     def test_warm_up_never_touches_the_booking_action(self):
         for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
             service = build_without_browser(cls)
-            for url in service._generate_warm_up_urls():
+            for url in service._generate_warm_up_urls(count=2):
                 assert "StepFlag=25" not in url
 
     def test_warm_up_urls_are_not_the_slow_list_page(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        for url in service._generate_warm_up_urls():
+        for url in service._generate_warm_up_urls(count=2):
             assert "module=net_booking" not in url
 
 
@@ -857,7 +936,7 @@ class TestWarmUpReadsBinaryAssets:
 
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         session = BinarySession()
-        results = asyncio.run(service.warm_up(session=session))
+        results = asyncio.run(service.warm_up(session=session, count=2))
 
         assert all(result.ok for result in results)
         assert all(result.connection == "keep-alive" for result in results)
@@ -905,3 +984,240 @@ class TestListPageTimeout:
             )
         assert body is None
         assert "TimeoutError" in caplog.text
+
+
+class FakeDriver:
+    """記錄呼叫的假 driver，不會真的開 Chrome。"""
+
+    def __init__(self, get_error: Exception | None = None):
+        self.get_calls: list[str] = []
+        self.quit_calls = 0
+        self._get_error = get_error
+
+    def get(self, url: str) -> None:
+        self.get_calls.append(url)
+        if self._get_error:
+            raise self._get_error
+
+    def quit(self) -> None:
+        self.quit_calls += 1
+
+
+class TestCheckBrowser:
+    def test_check_browser_quits_after_success(self, monkeypatch):
+        driver = FakeDriver()
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            lambda options=None: driver,
+        )
+        check_browser()
+        assert driver.get_calls == ["about:blank"]
+        assert driver.quit_calls == 1
+
+    def test_check_browser_never_visits_a_booking_site(self, monkeypatch):
+        driver = FakeDriver()
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            lambda options=None: driver,
+        )
+        check_browser()
+        assert set(driver.get_calls) == {"about:blank"}
+
+    def test_missing_chrome_becomes_browser_unavailable(self, monkeypatch):
+        def no_chrome(options=None):
+            raise WebDriverException("no chrome")
+
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            no_chrome,
+        )
+        with pytest.raises(BrowserUnavailable, match="Google Chrome"):
+            check_browser()
+
+    def test_quit_runs_even_when_get_fails(self, monkeypatch):
+        driver = FakeDriver(get_error=WebDriverException("boom"))
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            lambda options=None: driver,
+        )
+        with pytest.raises(BrowserUnavailable):
+            check_browser()
+        assert driver.quit_calls == 1
+
+
+class _CountingDriver:
+    def __init__(self) -> None:
+        self.quit_calls = 0
+
+    def quit(self) -> None:
+        self.quit_calls += 1
+
+
+class TestContextExitClosesChrome:
+    """取消或出錯時也要馬上關掉 Chrome，而不是等垃圾回收。"""
+
+    @staticmethod
+    def _service(driver):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        service._driver = driver
+        # 跳過 __init__ 就沒有登入旗標；設成未登入，logout() 只會記一行 log
+        service._SportsCenterWebService__is_login = False
+        service.login = lambda: None
+        return service
+
+    def test_quits_the_driver_once_after_the_with_block(self):
+        driver = _CountingDriver()
+        service = self._service(driver)
+
+        with service:
+            assert driver.quit_calls == 0
+
+        assert driver.quit_calls == 1
+        service.__del__()
+        assert driver.quit_calls == 1
+
+    def test_quits_the_driver_once_when_the_body_raises(self):
+        driver = _CountingDriver()
+        service = self._service(driver)
+
+        with pytest.raises(RuntimeError):
+            with service:
+                raise RuntimeError("模擬中途出錯")
+
+        assert driver.quit_calls == 1
+        service.__del__()
+        assert driver.quit_calls == 1
+
+    def test_quits_the_driver_even_when_logout_fails(self, caplog):
+        """登出失敗只記警告：搶完之後拋出來會把搶場地的結果蓋掉。"""
+        driver = _CountingDriver()
+        service = self._service(driver)
+        service.logout = Mock(side_effect=WebDriverException("登出鈕不見了"))
+
+        with caplog.at_level("WARNING"):
+            with service:
+                pass
+
+        assert driver.quit_calls == 1
+        assert "登出鈕不見了" in caplog.text
+
+    def test_a_logout_failure_does_not_replace_the_body_error(self):
+        driver = _CountingDriver()
+        service = self._service(driver)
+        service.logout = Mock(side_effect=WebDriverException("登出鈕不見了"))
+
+        with pytest.raises(RuntimeError, match="模擬中途出錯"):
+            with service:
+                raise RuntimeError("模擬中途出錯")
+
+        assert driver.quit_calls == 1
+
+    def test_quits_the_driver_when_login_raises(self):
+        """__enter__ 拋出時 __exit__ 不會被呼叫，Chrome 也得當場關掉。"""
+        driver = _CountingDriver()
+        service = self._service(driver)
+
+        def broken_login():
+            raise RuntimeError("模擬登入中途出錯")
+
+        service.login = broken_login
+
+        with pytest.raises(RuntimeError):
+            with service:
+                pass
+
+        assert driver.quit_calls == 1
+
+
+class TestCheckBrowserLogsTheCause:
+    def test_the_underlying_error_reaches_the_log(self, monkeypatch, caplog):
+        def no_chrome(options=None):
+            raise WebDriverException("chromedriver 版本不符 v135")
+
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.webdriver.Chrome",
+            no_chrome,
+        )
+        with caplog.at_level("ERROR"):
+            with pytest.raises(BrowserUnavailable):
+                check_browser()
+
+        assert "瀏覽器自我檢查失敗" in caplog.text
+        assert "chromedriver 版本不符 v135" in caplog.text
+
+
+class _NoAlertDriver(_FakeDriver):
+    """登入頁的提醒視窗永遠不出現。"""
+
+    def _poll_for_alert(self):
+        raise NoAlertPresentException("no such alert")
+
+
+class _SubmitFailsDriver(_FakeDriver):
+    """DoSubmit 之後既沒有歡迎訊息，也沒有錯誤訊息元素。"""
+
+    def find_element(self, by, value):
+        if value in ("//span[@id='lab_Name']", "showerror3"):
+            raise NoSuchElementException(f"no such element: {value}")
+        return super().find_element(by, value)
+
+
+class TestLoginFailureIsNotAnException:
+    """登入途中任何失敗都當成「沒登入」，讓引擎拋 LoginFailed、__exit__ 關 Chrome。"""
+
+    @staticmethod
+    def _build(driver):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        service._driver = driver
+        service._SportsCenterWebService__is_login = False
+        service._SportsCenterWebService__username = "A123456789"
+        service._SportsCenterWebService__password = "secret"
+        return service
+
+    def test_an_alert_that_never_appears_means_not_logged_in(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.LOGIN_WAIT_SECONDS", 0.2
+        )
+        service = self._build(
+            _NoAlertDriver(alert_texts=("這只是提醒！！！", "報名運動課程請使用個人帳密報名繳費"))
+        )
+
+        with caplog.at_level("ERROR"):
+            service.login()
+
+        assert service.login_status is False
+        assert "TimeoutException" in caplog.text
+        assert "secret" not in caplog.text
+        service._quit_driver()  # 不留給 __del__，免得測試結束後才冒出一行 log
+
+    def test_a_missing_error_element_means_not_logged_in(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "badminton_bot.services.sports_center_webservice.LOGIN_WAIT_SECONDS", 0.2
+        )
+        service = self._build(
+            _SubmitFailsDriver(alert_texts=("這只是提醒！！！", "報名運動課程請使用個人帳密報名繳費"))
+        )
+
+        with caplog.at_level("ERROR"):
+            service.login()
+
+        assert service.login_status is False
+        assert "NoSuchElementException" in caplog.text
+        assert "secret" not in caplog.text
+        service._quit_driver()  # 不留給 __del__，免得測試結束後才冒出一行 log
+
+
+class TestQuitFailureNeverHidesTheOutcome:
+    def test_a_failing_quit_is_only_logged(self, caplog):
+        class BrokenQuitDriver:
+            def quit(self):
+                raise WebDriverException("chromedriver 已經不見了")
+
+        service = TestContextExitClosesChrome._service(BrokenQuitDriver())
+
+        with caplog.at_level("WARNING"):
+            with service:
+                pass
+
+        assert "chromedriver 已經不見了" in caplog.text
+        assert service._driver is None

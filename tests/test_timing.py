@@ -1,11 +1,13 @@
 """Tests for the pure timing helpers. No network, no browser."""
 
+import threading
 import time
 
 import pytest
 
 from badminton_bot.utils.timing import (
     MAX_AUTO_CORRECTION_SECONDS,
+    Cancelled,
     compute_send_time,
     plan_send_time,
     resolve_theta,
@@ -38,6 +40,22 @@ class TestSleepThenSpin:
         sleep_then_spin(target_epoch=target, spin_window=0.05)
         cpu_used = time.process_time() - started_cpu
         assert cpu_used < 0.15
+
+    def test_cancel_event_interrupts_the_coarse_sleep(self):
+        ev = threading.Event()
+        threading.Timer(0.1, ev.set).start()
+        started = time.time()
+        with pytest.raises(Cancelled):
+            sleep_then_spin(time.time() + 30, cancel_event=ev)
+        assert time.time() - started < 1
+
+    def test_cancel_event_is_ignored_inside_the_spin_window(self):
+        """最後 busy-wait 那一段不檢查取消：此時已經是放出請求的前一刻。"""
+        ev = threading.Event()
+        ev.set()
+        target = time.time() + 0.1
+        sleep_then_spin(target, spin_window=1.0, cancel_event=ev)
+        assert time.time() >= target
 
     def test_on_tick_fires_once_per_whole_second(self):
         """既有的倒數 log 用 microsecond == 0 判斷，實際上幾乎不成立，訊息印不出來。"""

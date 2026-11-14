@@ -3,14 +3,14 @@
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 
-from .sports_center_webservice import SportsCenterWebService
+from .sports_center_webservice import Court, SportsCenterWebService
 
 
 class ZhongshanSportsCenterWebService(SportsCenterWebService):
     sport_center_name = "中山運動中心"
     login_page_url = "https://scr.cyc.org.tw/tp01.aspx?module=login_page&files=login"
     booking_window_days = 14
-    target_qpid = 84
+    courts = (Court("中山羽球場", 84),)
 
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
@@ -42,7 +42,7 @@ class ZhongshanSportsCenterWebService(SportsCenterWebService):
         else:
             return False
 
-    def _static_asset_urls(self) -> tuple[str, str]:
+    def _static_asset_urls(self) -> tuple[str, ...]:
         # 列表頁就是用這兩張圖標示可訂／已訂，所以它們確實存在於站上。
         # 預熱只需要連線建立起來 —— 就算路徑變了拿到 404，連線一樣是熱的。
         return (
@@ -59,11 +59,13 @@ class ZhongshanSportsCenterWebService(SportsCenterWebService):
             f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
         )
 
-    def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
+    def _generate_booking_url(
+        self, year: int, month: int, day: int, hour: int, qpid: int
+    ) -> str:
         # 產生搶場地 url。中山的 QTime 要補零
         return (
             f"https://scr.cyc.org.tw/tp01.aspx?module=net_booking"
-            f"&files=booking_place&StepFlag=25&QPid={type(self).target_qpid}"
+            f"&files=booking_place&StepFlag=25&QPid={qpid}"
             f"&QTime={str(hour).zfill(2)}&PT=1"
             f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
         )

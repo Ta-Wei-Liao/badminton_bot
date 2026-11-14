@@ -23,8 +23,10 @@ SLOT_AVAILABLE = "可訂"
 SLOT_TAKEN = "已訂"
 SLOT_UNKNOWN = "未知"
 
-# 連線池上限。只需要兩條熱連線，留餘裕給預熱與探測。
-CONNECTION_LIMIT = 10
+# 連線池上限。aiohttp 是 HTTP/1.1，一條連線一次只跑一個請求；
+# 開搶時最多 MAX_REQUESTS = 12 個請求同時送出，上限必須大於 12，
+# 否則部分請求會在開放瞬間排隊等連線。多出的留給探測與偵察。
+CONNECTION_LIMIT = 20
 
 # DNS 快取存活秒數，讓開搶那一刻不必再解析一次。
 DNS_CACHE_SECONDS = 300
@@ -51,6 +53,14 @@ MAX_ONE_WAY_SECONDS = 0.2
 
 # 握手包含 TCP 一個往返加 TLS 一個往返（TLS 1.3），也就是四段單程。
 HANDSHAKE_ONE_WAY_TRIPS = 4
+
+
+@dataclass(frozen=True)
+class Court:
+    """One bookable court: its display name and the site's venue id (QPid)."""
+
+    name: str
+    qpid: int
 
 
 @dataclass
@@ -147,6 +157,9 @@ class BookingAttempt:
     server_date: str | None
     success: bool | None
     error: str | None
+    court_name: str = ""
+    qpid: int = 0
+
 
 # Selenium 與 aiohttp 共用同一個 UA，否則登入與搶場地會用不同身分出現在對方的 log 裡。
 BROWSER_USER_AGENT = (
@@ -182,11 +195,53 @@ def build_browser_headers(referer: str) -> dict[str, str]:
     }
 
 
+class BrowserUnavailable(RuntimeError):
+    """本機找不到可用的 Chrome，或瀏覽器無法啟動。"""
+
+
+def build_chrome_options() -> Options:
+    """Build the headless Chrome options shared by login and the self-check."""
+    options = webdriver.ChromeOptions()
+
+    # run chrome browser without UI
+    options.add_argument("--headless")
+
+    # 模擬真實瀏覽器。必須用 --user-agent= 這個旗標，
+    # 直接丟裸字串進去 Chrome 不會當成 UA 設定。
+    options.add_argument(f"--user-agent={BROWSER_USER_AGENT}")
+
+    return options
+
+
+def check_browser() -> None:
+    """Start headless Chrome on about:blank and quit, never touching a booking site.
+
+    Raises:
+        BrowserUnavailable: Chrome cannot be started or driven.
+    """
+    driver = None
+    try:
+        driver = webdriver.Chrome(options=build_chrome_options())
+        driver.get("about:blank")
+    except Exception as exc:
+        # 給使用者看的訊息只有一句話，真正的原因（版本不符、權限…）要留在 log 裡
+        logging.exception("瀏覽器自我檢查失敗")
+        raise BrowserUnavailable(
+            "找不到可用的 Google Chrome，請先安裝 Chrome 並確認網路連線"
+        ) from exc
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                logging.warning("關閉自我檢查用的瀏覽器失敗")
+
+
 class SportsCenterWebService(ABC):
     sport_center_name: str
     login_page_url: str
     booking_window_days: int
-    target_qpid: int
+    courts: tuple[Court, ...]
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -198,7 +253,7 @@ class SportsCenterWebService(ABC):
             "sport_center_name",
             "login_page_url",
             "booking_window_days",
-            "target_qpid",
+            "courts",
         ]
 
         for attr in required_attrs:
@@ -224,33 +279,45 @@ class SportsCenterWebService(ABC):
         Returns:
             Options: Chrome options object
         """
-        options = webdriver.ChromeOptions()
+        return build_chrome_options()
 
-        # run chrome browser without UI
-        options.add_argument("--headless")
-
-        # 模擬真實瀏覽器。必須用 --user-agent= 這個旗標，
-        # 直接丟裸字串進去 Chrome 不會當成 UA 設定。
-        options.add_argument(f"--user-agent={BROWSER_USER_AGENT}")
-
-        return options
-
-    def __del__(self) -> None:
+    def _quit_driver(self) -> None:
+        """Quit Chrome once; later calls (e.g. from __del__) are no-ops."""
         # 瀏覽器有可能還沒開起來就失敗，這時不需要（也無法）關閉，
         # 否則 __del__ 拋出的 AttributeError 會蓋掉原本真正的錯誤
         driver = getattr(self, "_driver", None)
         if driver is None:
             return
 
+        self._driver = None
         logging.info("關閉瀏覽器")
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            # 搶完之後才在收尾時拋出，會把搶場地的結果蓋掉
+            logging.warning("關閉瀏覽器失敗", exc_info=True)
+
+    def __del__(self) -> None:
+        self._quit_driver()
 
     def __enter__(self):
-        self.login()
+        # __enter__ 拋出時 __exit__ 不會被呼叫，Chrome 得在這裡關
+        try:
+            self.login()
+        except BaseException:
+            self._quit_driver()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.logout()
+        # 離開時一定關掉 Chrome，不能等垃圾回收：取消時 traceback 會讓物件多活一陣子
+        try:
+            self.logout()
+        except Exception:
+            # 登出失敗不能往外拋：搶完之後拋出來會蓋掉搶場地的結果（或取消）
+            logging.warning("登出失敗", exc_info=True)
+        finally:
+            self._quit_driver()
 
     def login(self) -> None:
         """輸入帳密並且登入網路預約平台"""
@@ -263,6 +330,20 @@ class SportsCenterWebService(ABC):
 
             return
 
+        # 登入途中任何失敗（提醒視窗沒出現、找不到元素…）都當成沒登入：
+        # 讓引擎拋 LoginFailed，並由 __exit__ 照常關掉 Chrome
+        try:
+            self.__is_login = self._submit_login()
+        except Exception:
+            logging.exception("登入過程發生錯誤，視為登入失敗")
+            self.__is_login = False
+
+    def _submit_login(self) -> bool:
+        """Dismiss the reminders, fill in the form and submit it.
+
+        Returns:
+            bool: whether the site greeted us as logged in.
+        """
         # 兩個提醒視窗是頁面載入完才跳出來的（實測約 0.5 ~ 1 秒），所以要輪詢等待。
         # 不能用 lambda d: d.switch_to.alert，WebDriverWait 預設只忽略 NoSuchElementException，
         # alert 還沒跳出時丟的 NoAlertPresentException 會直接往外拋，等於只看了一次就放棄。
@@ -294,12 +375,13 @@ class SportsCenterWebService(ABC):
             welcome_message = self._wait_for_element(
                 self._get_login_user_name_from_website
             )
-            self.__is_login = True
-            logging.info("%s 登入成功!", welcome_message.text)
         except Exception:
             login_fail_element = self._get_login_failed_message()
             logging.error("%s", login_fail_element.text)
-            self.__is_login = False
+            return False
+
+        logging.info("%s 登入成功!", welcome_message.text)
+        return True
 
     def _wait_for_element(
         self,
@@ -430,19 +512,21 @@ class SportsCenterWebService(ABC):
             ),
         )
 
-    async def warm_up(self, session) -> list[WarmUpResult]:
-        """Open two read-only pages so two hot connections wait in the pool.
+    async def warm_up(self, session, count: int) -> list[WarmUpResult]:
+        """Open read-only assets so `count` hot connections wait in the pool.
 
         Everything the booking request would otherwise pay for at the opening
         instant — DNS, the TCP handshake, the TLS handshake — happens here.
 
         Args:
             session: the aiohttp session.
+            count (int): how many connections to warm, one per booking request
+                (never fewer than two).
 
         Returns:
             list[WarmUpResult]: one entry per warm-up URL, in URL order.
         """
-        urls = self._generate_warm_up_urls()
+        urls = self._generate_warm_up_urls(count)
 
         async def _open(url: str) -> WarmUpResult:
             try:
@@ -516,6 +600,7 @@ class SportsCenterWebService(ABC):
         booking_url: str,
         hour: int,
         ready_event: asyncio.Event,
+        court: Court,
     ) -> BookingAttempt:
         """Fire one pre-built booking request the moment the event is set.
 
@@ -531,6 +616,7 @@ class SportsCenterWebService(ABC):
             booking_url (str): the URL assembled ahead of time.
             hour (int): the hour being booked, for logging.
             ready_event (asyncio.Event): released at the send instant.
+            court (Court): the court being booked, recorded in the result.
 
         Returns:
             BookingAttempt: the outcome and its timings.
@@ -548,7 +634,7 @@ class SportsCenterWebService(ABC):
                 rtt = time.perf_counter() - started
                 server_date = response.headers.get("Date")
         except Exception as error:
-            logging.error("%d 點的場地請求失敗：%r", hour, error)
+            logging.error("%s %d 點的場地請求失敗：%r", court.name, hour, error)
             return BookingAttempt(
                 hour=hour,
                 url=booking_url,
@@ -557,6 +643,8 @@ class SportsCenterWebService(ABC):
                 server_date=None,
                 success=None,
                 error=repr(error),
+                court_name=court.name,
+                qpid=court.qpid,
             )
 
         try:
@@ -565,12 +653,14 @@ class SportsCenterWebService(ABC):
         except RuntimeError as runtime_error:
             success = None
             error = str(runtime_error)
-            logging.error("%d 點的場地回應無法判讀：%s", hour, runtime_error)
+            logging.error(
+                "%s %d 點的場地回應無法判讀：%s", court.name, hour, runtime_error
+            )
 
         if success is True:
-            logging.info("%d ~ %d 點的場地預約成功", hour, hour + 1)
+            logging.info("%s %d ~ %d 點的場地預約成功", court.name, hour, hour + 1)
         elif success is False:
-            logging.info("%d ~ %d 點的場地預約失敗", hour, hour + 1)
+            logging.info("%s %d ~ %d 點的場地預約失敗", court.name, hour, hour + 1)
 
         return BookingAttempt(
             hour=hour,
@@ -580,10 +670,14 @@ class SportsCenterWebService(ABC):
             server_date=server_date,
             success=success,
             error=error,
+            court_name=court.name,
+            qpid=court.qpid,
         )
 
     @abstractmethod
-    def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
+    def _generate_booking_url(
+        self, year: int, month: int, day: int, hour: int, qpid: int
+    ) -> str:
         pass
 
     @abstractmethod
@@ -594,7 +688,7 @@ class SportsCenterWebService(ABC):
     def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
         """唯讀的場地列表頁（StepFlag=2）。探測、預熱與狀態偵察都用這一頁。"""
 
-    def parse_slot_state(self, html: str, hour: int) -> str:
+    def parse_slot_state(self, html: str, hour: int, qpid: int) -> str:
         """Read the target court's state for one hour off the read-only list page.
 
         A bookable cell carries the site's own click handler, Step3Action(QPid,
@@ -609,11 +703,11 @@ class SportsCenterWebService(ABC):
         Args:
             html (str): the list page body.
             hour (int): the hour to look up.
+            qpid (int): the court's venue id.
 
         Returns:
             str: SLOT_AVAILABLE, SLOT_TAKEN or SLOT_UNKNOWN.
         """
-        qpid = type(self).target_qpid
         bookable = re.compile(
             rf"Step3Action\(\s*{qpid}\s*,\s*0?{hour}\s*\)"
         )
@@ -654,22 +748,26 @@ class SportsCenterWebService(ABC):
         return sorted({int(qpid) for qpid in bookable.findall(html)})
 
     @abstractmethod
-    def _static_asset_urls(self) -> tuple[str, str]:
-        """兩個靜態資源網址，用來預熱連線。由 Cloudflare 邊緣直接回，不碰應用伺服器。"""
+    def _static_asset_urls(self) -> tuple[str, ...]:
+        """靜態資源網址（互不相同），用來預熱連線。由 Cloudflare 邊緣直接回，不碰應用伺服器。"""
 
-    def _generate_warm_up_urls(self) -> tuple[str, ...]:
-        """Two URLs to open concurrently, leaving two hot connections behind.
+    def _generate_warm_up_urls(self, count: int) -> tuple[str, ...]:
+        """URLs to open concurrently, leaving one hot connection per request.
 
-        Two connections because the two booking requests each need one. Two
-        *different* URLs because a browser loading a page in parallel is
-        ordinary traffic, whereas the same URL fetched twice at once is not.
+        One connection per booking request because HTTP/1.1 runs one request
+        per connection. Every URL is *different* because a browser loading a
+        page in parallel is ordinary traffic, whereas the same URL fetched
+        many times at once is not.
 
         Static assets rather than the list page: warming up needs the
         connection, not the content, and the list page was measured taking
-        4-5 seconds — from T-10s that finished at T-4.6s, almost overrunning
-        its budget. An edge-served asset answers in tens of milliseconds.
+        4-5 seconds. An edge-served asset answers in tens of milliseconds.
+
+        Args:
+            count (int): number of booking requests about to be fired.
 
         Returns:
-            tuple[str, ...]: two static asset URLs.
+            tuple[str, ...]: max(2, min(count, assets available)) asset URLs.
         """
-        return self._static_asset_urls()
+        assets = self._static_asset_urls()
+        return assets[: max(2, min(count, len(assets)))]
