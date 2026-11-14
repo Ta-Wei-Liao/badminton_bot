@@ -7,6 +7,7 @@ response parsing, subclass contract) are exercised.
 """
 
 import asyncio
+import ssl
 from unittest.mock import Mock
 
 import pytest
@@ -29,6 +30,7 @@ from badminton_bot.services.sports_center_webservice import (
     SportsCenterWebService,
     WarmUpResult,
     build_browser_headers,
+    build_tls_context,
     check_browser,
 )
 from badminton_bot.services.zhongshan_sports_center_webservice import (
@@ -516,6 +518,36 @@ class TestCreateSession:
                 await session.close()
 
         asyncio.run(scenario())
+
+    def test_session_verifies_the_site_certificate(self):
+        """帶著登入 cookie 的連線不驗憑證，同網段的人就能冒充網站把 cookie 偷走。"""
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+
+        async def scenario():
+            session = service.create_session(
+                cookies={}, referer="https://example.invalid/list"
+            )
+            try:
+                # aiohttp 沒有公開的讀取介面，只能看 connector 內部存的設定
+                context = session.connector._ssl
+                assert isinstance(context, ssl.SSLContext)
+                assert context.verify_mode == ssl.CERT_REQUIRED
+                assert context.check_hostname
+            finally:
+                await session.close()
+
+        asyncio.run(scenario())
+
+
+class TestBuildTlsContext:
+    def test_verifies_certificates_and_hostnames(self):
+        context = build_tls_context()
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname
+
+    def test_loads_a_ca_bundle_independent_of_the_machine(self):
+        """打包版在球友電腦上找不到開發機的憑證路徑，必須自帶 certifi 的清單。"""
+        assert build_tls_context().cert_store_stats()["x509_ca"] > 0
 
 
 class FakeBookingResponse:
