@@ -18,6 +18,8 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.ui import WebDriverWait
 
+from badminton_bot.utils.errors import describe_error
+
 # 登入頁的提醒視窗與元素都是延遲出現的。登入本身在開搶前三分鐘執行，等久一點不影響搶場地
 LOGIN_WAIT_SECONDS = 10
 
@@ -556,7 +558,7 @@ class SportsCenterWebService(ABC):
                         keep_alive=response.headers.get("Keep-Alive"),
                     )
             except Exception as error:
-                logging.warning("預熱請求失敗（%s）：%r", url, error)
+                logging.warning("預熱請求失敗（%s）：%s", url, describe_error(error))
                 return WarmUpResult(url=url, ok=False)
 
         results = await asyncio.gather(*(_open(url) for url in urls))
@@ -603,8 +605,7 @@ class SportsCenterWebService(ABC):
             ) as response:
                 return await response.text()
         except Exception as error:
-            # 用 %r：asyncio.TimeoutError 的 str() 是空字串
-            logging.warning("取得場地列表頁失敗：%r", error)
+            logging.warning("取得場地列表頁失敗：%s", describe_error(error))
             return None
 
     async def booking_courts(
@@ -647,7 +648,7 @@ class SportsCenterWebService(ABC):
                 rtt = time.perf_counter() - started
                 server_date = response.headers.get("Date")
         except Exception as error:
-            logging.error("%s %d 點的場地請求失敗：%r", court.name, hour, error)
+            logging.error("%s %d 點的場地請求失敗：%s", court.name, hour, describe_error(error))
             return BookingAttempt(
                 hour=hour,
                 url=booking_url,
@@ -655,7 +656,7 @@ class SportsCenterWebService(ABC):
                 rtt=time.perf_counter() - started,
                 server_date=None,
                 success=None,
-                error=repr(error),
+                error=describe_error(error),
                 court_name=court.name,
                 qpid=court.qpid,
             )
