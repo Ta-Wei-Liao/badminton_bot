@@ -176,6 +176,40 @@ class TestRunBookingRace:
         assert len(session.requested_urls) == 2
 
 
+class TestRunBookingRaceOnReleased:
+    def test_on_released_runs_only_after_every_request_left(self):
+        session = OneGoodOneBadSession()
+        seen_at_release: list[int] = []
+
+        asyncio.run(
+            run_booking_race(
+                service=object.__new__(ZhongzhengSportsCenterWebService),
+                session=session,
+                targets=(target(20), target(21)),
+                send_at_epoch=time.time() + 0.05,
+                on_released=lambda: seen_at_release.append(len(session.requested_urls)),
+            )
+        )
+
+        assert seen_at_release == [2]
+
+    def test_a_raising_on_released_does_not_cancel_the_requests(self):
+        def explode():
+            raise RuntimeError("模擬回呼出錯")
+
+        attempts = asyncio.run(
+            run_booking_race(
+                service=object.__new__(ZhongzhengSportsCenterWebService),
+                session=OneGoodOneBadSession(),
+                targets=(target(20),),
+                send_at_epoch=time.time(),
+                on_released=explode,
+            )
+        )
+
+        assert attempts[0].success is True
+
+
 class TestRunWithDeadline:
     """卡住的請求不會拋任何例外，try/except 攔不到，只有時間預算攔得到。"""
 
@@ -509,6 +543,48 @@ class TestGrabRunner:
         assert runner.fired is True
         assert len(attempts) == 4
         assert all(a.success is True for a in attempts)
+
+    def test_cancel_after_login_failed_does_not_touch_the_closed_loop(
+        self, offline_engine, monkeypatch
+    ):
+        """登入失敗的同時按取消（或連按兩次），loop 已經關了，不能炸 RuntimeError。"""
+        monkeypatch.setattr(FakeService, "login", lambda self: None)
+        runner = GrabRunner(make_config(open_in=timedelta(minutes=1)))
+        with pytest.raises(LoginFailed):
+            asyncio.run(runner.run())
+
+        assert runner.cancel() is True
+        assert runner.cancel() is True
+
+    def test_cancel_after_cancelled_does_not_touch_the_closed_loop(self, offline_engine):
+        runner = GrabRunner(make_config(open_in=timedelta(minutes=10)))
+        threading.Timer(0.2, runner.cancel).start()
+        with pytest.raises(Cancelled):
+            asyncio.run(runner.run())
+
+        assert runner.cancel() is True
+
+    def test_a_failing_stage_callback_never_blocks_the_release(self, offline_engine):
+        """GUI 回呼在「已送出」時炸掉，請求還是要全部送出去。"""
+
+        def on_stage(stage: str) -> None:
+            if stage == "已送出，等待回應":
+                raise RuntimeError("模擬 GUI 回呼出錯")
+
+        runner = GrabRunner(make_config(), on_stage=on_stage)
+        attempts = asyncio.run(runner.run())
+
+        (service,) = FakeService.instances
+        assert len(service.session.booking_urls) == 4
+        assert all(a.success is True for a in attempts)
+        assert runner.fired is True
+
+    def test_every_stage_callback_failure_is_survived(self, offline_engine):
+        def on_stage(stage: str) -> None:
+            raise RuntimeError("每個階段都炸")
+
+        attempts = asyncio.run(GrabRunner(make_config(), on_stage=on_stage).run())
+        assert len(attempts) == 4
 
     def test_password_never_appears_in_config_repr(self):
         assert "s3cret" not in repr(make_config())

@@ -227,6 +227,7 @@ async def run_booking_race(
     targets: Sequence[BookingTarget],
     send_at_epoch: float,
     on_fired: Callable[[], None] | None = None,
+    on_released: Callable[[], None] | None = None,
 ) -> list[BookingAttempt]:
     """Arm every booking request, then release them all at the send instant.
 
@@ -244,6 +245,10 @@ async def run_booking_race(
         send_at_epoch (float): when to release the requests.
         on_fired (Callable[[], None] | None, optional): called right before the
             requests are released. Raising from it releases nothing.
+        on_released (Callable[[], None] | None, optional): called after the
+            requests have left. Queued behind them on the event loop, so its
+            latency can never delay the send, and an exception from it is only
+            logged.
 
     Returns:
         list[BookingAttempt]: one attempt per target, in the order given.
@@ -313,6 +318,17 @@ async def run_booking_race(
         raise
 
     ready_event.set()
+
+    if on_released is not None:
+        # set() 已經把每個請求的喚醒排進 loop；call_soon 排在它們後面，
+        # 所以回呼最快也是在全部請求送出之後才跑，再慢也拖不到送出時刻
+        def _safe_on_released() -> None:
+            try:
+                on_released()
+            except Exception as error:
+                logging.warning("送出後的回呼失敗：%r", error)
+
+        asyncio.get_running_loop().call_soon(_safe_on_released)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -438,7 +454,12 @@ class GrabRunner:
 
             self._fired = True
 
-        self._on_stage(STAGE_FIRED)
+    def _stage(self, stage: str) -> None:
+        """Report a stage; a broken UI callback must never break the grab."""
+        try:
+            self._on_stage(stage)
+        except Exception as error:
+            logging.warning("回報階段「%s」失敗：%r", stage, error)
 
     def _count_down(self, offset: timedelta) -> None:
         try:
@@ -467,29 +488,35 @@ class GrabRunner:
         with self._lock:
             self._loop = asyncio.get_running_loop()
             self._task = asyncio.current_task()
+
+        try:
             if self._cancel_event.is_set():
                 # 還沒開始就被取消了，那時候沒有 task 可以 cancel
                 self._cancel_delivered = True
                 raise Cancelled()
 
-        try:
-            self._on_stage(STAGE_BROWSER_CHECK)
+            self._stage(STAGE_BROWSER_CHECK)
             check_browser()
             with keep_awake():
                 return await self._run_schedule()
         except asyncio.CancelledError:
             raise Cancelled() from None
+        finally:
+            # asyncio.run 結束就會關掉 loop；之後再按取消不能去碰已關閉的 loop
+            with self._lock:
+                self._loop = None
+                self._task = None
 
     async def _run_schedule(self) -> list[BookingAttempt]:
         config = self._config
 
-        self._on_stage(STAGE_WAITING_LOGIN)
+        self._stage(STAGE_WAITING_LOGIN)
         theta_ntp = query_clock_offset()
 
         # 倒數至開搶前的登入時間，太早登入有 session 過期的風險
         self._count_down(LOGIN_OFFSET)
 
-        self._on_stage(STAGE_LOGGING_IN)
+        self._stage(STAGE_LOGGING_IN)
         attempts: list[BookingAttempt] | None = None
         with config.service_cls(
             username=config.username, password=config.password
@@ -502,7 +529,7 @@ class GrabRunner:
             logging.error("登入失敗！")
             raise LoginFailed("登入失敗，請確認身分證字號與密碼")
 
-        self._on_stage(STAGE_DONE)
+        self._stage(STAGE_DONE)
         return attempts
 
     async def _grab(
@@ -521,7 +548,7 @@ class GrabRunner:
         )
 
         async with service.create_session(cookies=cookies, referer=referer) as session:
-            self._on_stage(STAGE_CLOCK)
+            self._stage(STAGE_CLOCK)
             probe_deadline_epoch = (config.open_at + PROBE_DEADLINE_OFFSET).timestamp()
             measurement = await run_with_deadline(
                 measure_server_clock(
@@ -560,7 +587,7 @@ class GrabRunner:
 
             # 開放前查看場地狀態。列表頁要 4~5 秒，所以提前到 T-40s 單獨做，
             # 不跟預熱擠在最後十秒。只記錄，不對結果做任何分支。
-            self._on_stage(STAGE_PRE_CHECK)
+            self._stage(STAGE_PRE_CHECK)
             self._count_down(PRE_CHECK_OFFSET)
             report_slot_states(
                 service=service,
@@ -600,7 +627,7 @@ class GrabRunner:
                 )
 
             # 倒數至預熱時機，每個請求各預熱一條連線
-            self._on_stage(STAGE_WARM_UP)
+            self._stage(STAGE_WARM_UP)
             self._count_down(WARM_UP_OFFSET)
             await run_with_deadline(
                 service.warm_up(session=session, count=len(targets)),
@@ -638,20 +665,21 @@ class GrabRunner:
                 source,
             )
 
-            self._on_stage(STAGE_COUNTDOWN)
+            self._stage(STAGE_COUNTDOWN)
             attempts = await run_booking_race(
                 service=service,
                 session=session,
                 targets=targets,
                 send_at_epoch=send_at_epoch,
                 on_fired=self._mark_fired,
+                on_released=lambda: self._stage(STAGE_FIRED),
             )
             report_attempts(
                 attempts=attempts, reference_epoch=nominal_epoch, source=source
             )
 
             # 事後偵察：這是「輸幾毫秒」與「根本沒開放給你」之間唯一的判別依據
-            self._on_stage(STAGE_POST_CHECK)
+            self._stage(STAGE_POST_CHECK)
             await asyncio.sleep(POST_CHECK_DELAY_SECONDS)
             report_slot_states(
                 service=service,
