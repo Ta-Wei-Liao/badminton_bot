@@ -54,6 +54,9 @@ LOG_FALLBACK_DIRS = (
     Path(tempfile.gettempdir()) / "badminton_bot_logs",
 )
 
+# 這些套件在 DEBUG 會記下送出的請求內容（Selenium 連密碼都會記），只留 WARNING 以上
+QUIET_LIBRARY_LOGGERS = ("selenium", "urllib3", "asyncio")
+
 # 開搶前這麼久登入，太早登入有 session 過期的風險
 LOGIN_OFFSET = timedelta(minutes=-3)
 
@@ -769,6 +772,10 @@ def set_logger(
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
+    # Selenium 的 DEBUG 會印出送給瀏覽器的每個指令，包含填進去的密碼；
+    # 把第三方套件固定在 WARNING，就算根 logger 之後被調成 DEBUG 也不會寫進 log 檔
+    for library in QUIET_LIBRARY_LOGGERS:
+        logging.getLogger(library).setLevel(logging.WARNING)
 
     # 重複呼叫不該疊加 handler，否則同一行會被印很多次
     for existing in list(root_logger.handlers):

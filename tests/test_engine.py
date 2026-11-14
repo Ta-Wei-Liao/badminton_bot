@@ -328,6 +328,17 @@ class TestSetLogger:
         logging.info("給視窗看的訊息")
         assert any(r.getMessage() == "給視窗看的訊息" for r in records)
 
+    @pytest.mark.parametrize("name", ["selenium", "urllib3"])
+    def test_library_debug_output_never_reaches_the_file(self, tmp_path, name):
+        """Selenium 的 DEBUG 會印出送給瀏覽器的指令，包含填進去的密碼。"""
+        log_path = set_logger(tmp_path)
+        # 就算之後有人把根 logger 調成 DEBUG 也一樣
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger(f"{name}.child").debug("password=secret")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        assert "secret" not in log_path.read_text(encoding="utf-8")
+
 
 class TestReportSlotStatesDistinguishesNotYetOpen:
     """週四 T-40s 時，要搶的那一天還沒進入預約窗口，頁面不會渲染它。
