@@ -16,7 +16,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from badminton_bot.booking_plan import BookingTarget, validate_targets
+from badminton_bot.booking_plan import (
+    TAIPEI,
+    BookingTarget,
+    GrabMode,
+    describe_day,
+    validate_immediate,
+    validate_targets,
+)
 from badminton_bot.services.sports_center_webservice import (
     SLOT_UNKNOWN,
     BookingAttempt,
@@ -99,6 +106,7 @@ FINAL_SPIN_SECONDS = 0.3
 STAGE_BROWSER_CHECK = "瀏覽器自我檢查"
 STAGE_WAITING_LOGIN = "等待登入"
 STAGE_LOGGING_IN = "登入中"
+STAGE_SENDING = "送出中"
 STAGE_CLOCK = "校時中"
 STAGE_PRE_CHECK = "開放前檢查"
 STAGE_WARM_UP = "預熱連線"
@@ -147,8 +155,10 @@ class GrabConfig:
     service_cls: type[SportsCenterWebService]
     username: str
     password: str = field(repr=False)
-    open_at: datetime
+    # 立即預約不等開搶，沒有開搶時刻
+    open_at: datetime | None
     targets: tuple[BookingTarget, ...]
+    mode: GrabMode = GrabMode.MIDNIGHT
 
 
 def report_slot_states(
@@ -501,7 +511,14 @@ class GrabRunner:
         config = self._config
         if not is_center_enabled(config.service_cls):
             raise ValueError(f"{config.service_cls.sport_center_name}目前暫時停止使用")
-        validate_targets(config.targets)
+        if config.mode is GrabMode.IMMEDIATE:
+            validate_immediate(
+                config.targets,
+                datetime.now(TAIPEI),
+                config.service_cls.booking_window_days,
+            )
+        else:
+            validate_targets(config.targets)
 
         with self._lock:
             self._loop = asyncio.get_running_loop()
@@ -516,6 +533,8 @@ class GrabRunner:
             self._stage(STAGE_BROWSER_CHECK)
             check_browser()
             with keep_awake():
+                if config.mode is GrabMode.IMMEDIATE:
+                    return await self._run_immediate()
                 return await self._run_schedule()
         except asyncio.CancelledError:
             raise Cancelled() from None
@@ -541,6 +560,68 @@ class GrabRunner:
         ) as service:
             if service.login_status:
                 attempts = await self._grab(service, theta_ntp)
+
+        # 離開 with 之後才拋：登出、關 Chrome 照常完成
+        if attempts is None:
+            logging.error("登入失敗！")
+            raise LoginFailed("登入失敗，請確認身分證字號與密碼")
+
+        self._stage(STAGE_DONE)
+        return attempts
+
+    async def _run_immediate(self) -> list[BookingAttempt]:
+        """Log in and fire every target at once: no clock, checks or warm-up.
+
+        The day is already open, so nobody is racing for the instant; every
+        extra request would only add load on the site and risk to the account.
+        """
+        config = self._config
+        targets = config.targets
+        day = targets[0].start.date()
+        logging.info(
+            "立即預約：%s，共 %d 筆",
+            describe_day(day, today=datetime.now(TAIPEI).date()),
+            len(targets),
+        )
+
+        self._stage(STAGE_LOGGING_IN)
+        if self._cancel_event.is_set():
+            self._cancel_delivered = True
+            raise Cancelled()
+
+        attempts: list[BookingAttempt] | None = None
+        with config.service_cls(
+            username=config.username, password=config.password
+        ) as service:
+            if service.login_status:
+                # 登入可能要十幾秒，期間跨過整點的時段已經開始，不能再送；
+                # 在 with 裡面拋，登出、關 Chrome 照常完成
+                validate_immediate(
+                    targets,
+                    datetime.now(TAIPEI),
+                    config.service_cls.booking_window_days,
+                )
+                referer = service._generate_list_page_url(
+                    year=day.year, month=day.month, day=day.day
+                )
+                async with service.create_session(
+                    cookies=service.get_cookies(), referer=referer
+                ) as session:
+                    self._stage(STAGE_SENDING)
+                    send_at_epoch = time.time()
+                    attempts = await run_booking_race(
+                        service=service,
+                        session=session,
+                        targets=targets,
+                        send_at_epoch=send_at_epoch,
+                        on_fired=self._mark_fired,
+                        on_released=lambda: self._stage(STAGE_FIRED),
+                    )
+                    report_attempts(
+                        attempts=attempts,
+                        reference_epoch=send_at_epoch,
+                        source="未校時（立即預約）",
+                    )
 
         # 離開 with 之後才拋：登出、關 Chrome 照常完成
         if attempts is None:

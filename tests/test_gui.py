@@ -4,11 +4,12 @@ import asyncio
 import logging
 import queue
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from badminton_bot.booking_plan import TAIPEI
 from badminton_bot.engine import GrabConfig, GrabRunner, set_logger
 from badminton_bot.gui import (
+    day_choices,
     QUIET_SECONDS,
     QueueLogHandler,
     format_remaining,
@@ -194,3 +195,35 @@ class TestStatusText:
 
     def test_nothing_to_show_without_a_stage(self):
         assert status_text("", remaining=65, fired=False) is None
+
+
+def test_day_choices_label_today():
+    now = datetime(2026, 11, 14, 18, 20, tzinfo=TAIPEI)
+    choices = day_choices(now, 7)
+    assert choices[0] == ("11/14（六）今天", date(2026, 11, 14))
+    assert len(choices) == 8
+
+
+def test_days_follow_the_clock():
+    """表單開著跨過午夜，選單要跟著變，昨天不能再出現。"""
+    before = day_choices(datetime(2026, 11, 14, 23, 59, tzinfo=TAIPEI), 7)
+    after = day_choices(datetime(2026, 11, 15, 0, 1, tzinfo=TAIPEI), 7)
+    assert date(2026, 11, 14) in [d for _, d in before]
+    assert date(2026, 11, 14) not in [d for _, d in after]
+
+
+def test_status_without_open_time_shows_the_stage():
+    assert status_text("登入中", remaining=0.0, fired=False) == "登入中"
+
+
+def test_run_grab_reports_a_refused_selection_as_an_error():
+    """確認視窗開太久、時段在送出前開始了：引擎拒絕，使用者要看到原因，不是「未預期的錯誤」。"""
+
+    class RefusingRunner:
+        async def run(self):
+            raise ValueError("19:00 的時段已經過了")
+
+    events: queue.Queue = queue.Queue()
+    run_grab(RefusingRunner(), events)
+
+    assert drain(events)[-1] == ("error", "19:00 的時段已經過了")
