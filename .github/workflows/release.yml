@@ -25,7 +25,7 @@ jobs:
       - name: Check tag matches __version__
         shell: bash
         run: |
-          version=$(python -c "import badminton_bot; print(badminton_bot.__version__)")
+          version=$(python -c "import badminton_bot; print(badminton_bot.__version__)" | tr -d '\r')
           tag="${GITHUB_REF_NAME#v}"
           if [ "$tag" != "$version" ]; then
             echo "::error::標籤 ${GITHUB_REF_NAME} 與 badminton_bot.__version__（${version}）不符"
