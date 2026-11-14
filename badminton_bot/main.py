@@ -107,7 +107,9 @@ def report_slot_states(service, html: str | None, booking_periods, label: str) -
 
     for booking_date in booking_periods:
         available = service.parse_available_courts(html, hour=booking_date.hour)
-        state = service.parse_slot_state(html, hour=booking_date.hour)
+        state = service.parse_slot_state(
+            html, hour=booking_date.hour, qpid=service.courts[0].qpid
+        )
 
         # 開搶前要的那一天還沒進入預約窗口，頁面根本不會渲染它 —— 此時
         # 「還空著 0 片」讀起來像全被掃光，但真相是這一天還看不到。
@@ -195,6 +197,7 @@ async def run_booking_race(
             month=booking_date.month,
             day=booking_date.day,
             hour=booking_date.hour,
+            qpid=service.courts[0].qpid,
         )
         logging.info("已備妥 %d 點的請求：%s", booking_date.hour, booking_url)
         tasks.append(
@@ -204,6 +207,7 @@ async def run_booking_race(
                     booking_url=booking_url,
                     hour=booking_date.hour,
                     ready_event=ready_event,
+                    court=service.courts[0],
                 )
             )
         )

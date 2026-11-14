@@ -312,7 +312,7 @@ class TestReportSlotStatesDistinguishesNotYetOpen:
         """頁面有渲染我們的場地（別的時段可訂），所以 0 片是真的被掃光。"""
         from badminton_bot.main import report_slot_states
 
-        html = '<a onclick="Step3Action(1199, 19)"></a>'
+        html = '<a onclick="Step3Action(1196, 19)"></a>'
         with caplog.at_level("INFO"):
             report_slot_states(
                 service=self._service(),

@@ -53,6 +53,14 @@ MAX_ONE_WAY_SECONDS = 0.2
 HANDSHAKE_ONE_WAY_TRIPS = 4
 
 
+@dataclass(frozen=True)
+class Court:
+    """One bookable court: its display name and the site's venue id (QPid)."""
+
+    name: str
+    qpid: int
+
+
 @dataclass
 class HandshakeTiming:
     """Network flight time measured from connection setup, not from responses.
@@ -147,6 +155,9 @@ class BookingAttempt:
     server_date: str | None
     success: bool | None
     error: str | None
+    court_name: str = ""
+    qpid: int = 0
+
 
 # Selenium 與 aiohttp 共用同一個 UA，否則登入與搶場地會用不同身分出現在對方的 log 裡。
 BROWSER_USER_AGENT = (
@@ -186,7 +197,7 @@ class SportsCenterWebService(ABC):
     sport_center_name: str
     login_page_url: str
     booking_window_days: int
-    target_qpid: int
+    courts: tuple[Court, ...]
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -198,7 +209,7 @@ class SportsCenterWebService(ABC):
             "sport_center_name",
             "login_page_url",
             "booking_window_days",
-            "target_qpid",
+            "courts",
         ]
 
         for attr in required_attrs:
@@ -516,6 +527,7 @@ class SportsCenterWebService(ABC):
         booking_url: str,
         hour: int,
         ready_event: asyncio.Event,
+        court: Court,
     ) -> BookingAttempt:
         """Fire one pre-built booking request the moment the event is set.
 
@@ -531,6 +543,7 @@ class SportsCenterWebService(ABC):
             booking_url (str): the URL assembled ahead of time.
             hour (int): the hour being booked, for logging.
             ready_event (asyncio.Event): released at the send instant.
+            court (Court): the court being booked, recorded in the result.
 
         Returns:
             BookingAttempt: the outcome and its timings.
@@ -548,7 +561,7 @@ class SportsCenterWebService(ABC):
                 rtt = time.perf_counter() - started
                 server_date = response.headers.get("Date")
         except Exception as error:
-            logging.error("%d 點的場地請求失敗：%r", hour, error)
+            logging.error("%s %d 點的場地請求失敗：%r", court.name, hour, error)
             return BookingAttempt(
                 hour=hour,
                 url=booking_url,
@@ -557,6 +570,8 @@ class SportsCenterWebService(ABC):
                 server_date=None,
                 success=None,
                 error=repr(error),
+                court_name=court.name,
+                qpid=court.qpid,
             )
 
         try:
@@ -565,12 +580,14 @@ class SportsCenterWebService(ABC):
         except RuntimeError as runtime_error:
             success = None
             error = str(runtime_error)
-            logging.error("%d 點的場地回應無法判讀：%s", hour, runtime_error)
+            logging.error(
+                "%s %d 點的場地回應無法判讀：%s", court.name, hour, runtime_error
+            )
 
         if success is True:
-            logging.info("%d ~ %d 點的場地預約成功", hour, hour + 1)
+            logging.info("%s %d ~ %d 點的場地預約成功", court.name, hour, hour + 1)
         elif success is False:
-            logging.info("%d ~ %d 點的場地預約失敗", hour, hour + 1)
+            logging.info("%s %d ~ %d 點的場地預約失敗", court.name, hour, hour + 1)
 
         return BookingAttempt(
             hour=hour,
@@ -580,10 +597,14 @@ class SportsCenterWebService(ABC):
             server_date=server_date,
             success=success,
             error=error,
+            court_name=court.name,
+            qpid=court.qpid,
         )
 
     @abstractmethod
-    def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
+    def _generate_booking_url(
+        self, year: int, month: int, day: int, hour: int, qpid: int
+    ) -> str:
         pass
 
     @abstractmethod
@@ -594,7 +615,7 @@ class SportsCenterWebService(ABC):
     def _generate_list_page_url(self, year: int, month: int, day: int) -> str:
         """唯讀的場地列表頁（StepFlag=2）。探測、預熱與狀態偵察都用這一頁。"""
 
-    def parse_slot_state(self, html: str, hour: int) -> str:
+    def parse_slot_state(self, html: str, hour: int, qpid: int) -> str:
         """Read the target court's state for one hour off the read-only list page.
 
         A bookable cell carries the site's own click handler, Step3Action(QPid,
@@ -609,11 +630,11 @@ class SportsCenterWebService(ABC):
         Args:
             html (str): the list page body.
             hour (int): the hour to look up.
+            qpid (int): the court's venue id.
 
         Returns:
             str: SLOT_AVAILABLE, SLOT_TAKEN or SLOT_UNKNOWN.
         """
-        qpid = type(self).target_qpid
         bookable = re.compile(
             rf"Step3Action\(\s*{qpid}\s*,\s*0?{hour}\s*\)"
         )

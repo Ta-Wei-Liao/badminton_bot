@@ -3,14 +3,20 @@
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 
-from .sports_center_webservice import SportsCenterWebService
+from .sports_center_webservice import Court, SportsCenterWebService
 
 
 class ZhongzhengSportsCenterWebService(SportsCenterWebService):
     sport_center_name = "中正運動中心"
     login_page_url = "https://bwd.xuanen.com.tw/wd27.aspx?module=login_page&files=login"
     booking_window_days = 7
-    target_qpid = 1199  # 羽球 7-4。換場地只要改這一行。
+    courts = (
+        Court("羽球7-1", 1196),
+        Court("羽球7-2", 1197),
+        Court("羽球7-3", 1198),
+        Court("羽球7-4", 1199),
+        Court("羽球7-5", 1200),
+    )
 
     def __init__(self, username: str, password: str) -> None:
         super().__init__(username=username, password=password)
@@ -58,11 +64,13 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
             f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
         )
 
-    def _generate_booking_url(self, year: int, month: int, day: int, hour: int) -> str:
+    def _generate_booking_url(
+        self, year: int, month: int, day: int, hour: int, qpid: int
+    ) -> str:
         # 產生搶場地 url。中正的 QTime 不補零
         return (
             f"https://bwd.xuanen.com.tw/wd27.aspx?module=net_booking"
-            f"&files=booking_place&StepFlag=25&QPid={type(self).target_qpid}"
+            f"&files=booking_place&StepFlag=25&QPid={qpid}"
             f"&QTime={str(hour)}&PT=1"
             f"&D={year}/{str(month).zfill(2)}/{str(day).zfill(2)}"
         )

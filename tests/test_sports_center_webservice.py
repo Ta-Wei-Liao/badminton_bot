@@ -20,6 +20,7 @@ from badminton_bot.services.sports_center_webservice import (
     SLOT_TAKEN,
     SLOT_UNKNOWN,
     BookingAttempt,
+    Court,
     SportsCenterWebService,
     WarmUpResult,
     build_browser_headers,
@@ -46,7 +47,7 @@ class TestSubclassContract:
             "sport_center_name",
             "login_page_url",
             "booking_window_days",
-            "target_qpid",
+            "courts",
         ):
             assert attr in service_cls.__dict__
 
@@ -66,7 +67,7 @@ class TestSubclassContract:
 class TestGenerateBookingUrl:
     def test_zhongshan_zero_pads_the_hour(self):
         url = build_without_browser(ZhongshanSportsCenterWebService)._generate_booking_url(
-            year=2025, month=4, day=12, hour=9
+            year=2025, month=4, day=12, hour=9, qpid=84
         )
         assert "QTime=09" in url
         assert "D=2025/04/12" in url
@@ -74,7 +75,7 @@ class TestGenerateBookingUrl:
 
     def test_zhongzheng_does_not_zero_pad_the_hour(self):
         url = build_without_browser(ZhongzhengSportsCenterWebService)._generate_booking_url(
-            year=2025, month=4, day=12, hour=9
+            year=2025, month=4, day=12, hour=9, qpid=84
         )
         assert "QTime=9" in url
         assert "QTime=09" not in url
@@ -86,15 +87,16 @@ class TestGenerateBookingUrl:
         [(ZhongshanSportsCenterWebService, "QPid=84"), (ZhongzhengSportsCenterWebService, "QPid=1199")],
     )
     def test_each_center_targets_its_own_venue_id(self, service_cls, expected_qpid):
+        qpid = int(expected_qpid.removeprefix("QPid="))
         url = build_without_browser(service_cls)._generate_booking_url(
-            year=2025, month=4, day=12, hour=20
+            year=2025, month=4, day=12, hour=20, qpid=qpid
         )
         assert expected_qpid in url
 
     @pytest.mark.parametrize("service_cls", SERVICE_CLASSES)
     def test_month_and_day_are_always_zero_padded(self, service_cls):
         url = build_without_browser(service_cls)._generate_booking_url(
-            year=2025, month=12, day=5, hour=20
+            year=2025, month=12, day=5, hour=20, qpid=84
         )
         assert "D=2025/12/05" in url
 
@@ -281,25 +283,36 @@ class TestLoginWaitsForDelayedElements:
         assert "DoSubmit()" in service._driver.executed_scripts
 
 
-class TestTargetQpidContract:
-    def test_both_centres_declare_their_target_court(self):
-        assert ZhongzhengSportsCenterWebService.target_qpid == 1199
-        assert ZhongshanSportsCenterWebService.target_qpid == 84
+class TestCourtsContract:
+    def test_zhongshan_offers_its_single_court(self):
+        assert ZhongshanSportsCenterWebService.courts == (Court("中山羽球場", 84),)
 
-    def test_a_subclass_without_target_qpid_is_rejected_at_import_time(self):
+    def test_zhongzheng_offers_exactly_the_five_7_courts(self):
+        assert ZhongzhengSportsCenterWebService.courts == (
+            Court("羽球7-1", 1196),
+            Court("羽球7-2", 1197),
+            Court("羽球7-3", 1198),
+            Court("羽球7-4", 1199),
+            Court("羽球7-5", 1200),
+        )
+
+    def test_a_subclass_without_courts_is_rejected_at_import_time(self):
         """__init_subclass__ 在類別定義時就擋下來，而不是等到執行期才炸。"""
-        with pytest.raises(TypeError, match="target_qpid"):
+        with pytest.raises(TypeError, match="courts"):
 
             class Incomplete(SportsCenterWebService):
                 sport_center_name = "測試中心"
                 login_page_url = "https://example.invalid/login"
                 booking_window_days = 7
 
-    def test_the_booking_url_is_built_from_the_class_attribute(self):
-        """換場地應該只要改 target_qpid 一行。"""
+    def test_booking_url_uses_the_qpid_it_is_given(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        url = service._generate_booking_url(year=2026, month=9, day=17, hour=20)
-        assert f"QPid={ZhongzhengSportsCenterWebService.target_qpid}" in url
+        url = service._generate_booking_url(
+            year=2026, month=11, day=26, hour=20, qpid=1197
+        )
+        assert "QPid=1197&QTime=20&" in url
+        assert "StepFlag=25" in url
+        assert "D=2026/11/26" in url
 
 
 class TestListPageUrl:
@@ -363,51 +376,58 @@ LIST_PAGE_HTML_PADDED_HOUR = """
 
 
 class TestParseSlotState:
+    def test_slot_state_is_looked_up_per_court(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        html = "Step3Action(1196,20) Step3Action(1199,21)"
+        assert service.parse_slot_state(html, hour=20, qpid=1196) == SLOT_AVAILABLE
+        assert service.parse_slot_state(html, hour=20, qpid=1199) == SLOT_TAKEN
+        assert service.parse_slot_state(html, hour=20, qpid=1200) == SLOT_UNKNOWN
+
     def test_an_open_slot_is_reported_available(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state(LIST_PAGE_HTML, hour=19) == SLOT_AVAILABLE
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=19, qpid=1199) == SLOT_AVAILABLE
 
     def test_a_slot_without_its_click_handler_is_reported_taken(self):
         """20:00 那格的 Step3Action 呼叫不見了 —— 被別人訂走了。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20, qpid=1199) == SLOT_TAKEN
 
     def test_another_court_at_the_same_hour_does_not_count(self):
         """1196 的 20:00 還空著，但我們要的是 1199。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20) == SLOT_TAKEN
+        assert service.parse_slot_state(LIST_PAGE_HTML, hour=20, qpid=1199) == SLOT_TAKEN
 
     def test_a_page_that_never_mentions_our_court_is_unknown(self):
         """預約窗口還沒開時列表頁可能根本不渲染那一天 —— 那是未知，不是已訂。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        assert service.parse_slot_state("<html>查無資料</html>", hour=20) == SLOT_UNKNOWN
+        assert service.parse_slot_state("<html>查無資料</html>", hour=20, qpid=1199) == SLOT_UNKNOWN
 
     def test_tolerates_a_zero_padded_hour(self):
         """中山的 QTime 補零、中正不補，解析不該依賴這個差異。"""
         service = build_without_browser(ZhongshanSportsCenterWebService)
         assert (
-            service.parse_slot_state(LIST_PAGE_HTML_PADDED_HOUR, hour=9)
+            service.parse_slot_state(LIST_PAGE_HTML_PADDED_HOUR, hour=9, qpid=84)
             == SLOT_AVAILABLE
         )
 
     def test_tolerates_whitespace_in_the_call(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         html = '<a onclick="Step3Action( 1199 , 20 )">'
-        assert service.parse_slot_state(html, hour=20) == SLOT_AVAILABLE
+        assert service.parse_slot_state(html, hour=20, qpid=1199) == SLOT_AVAILABLE
 
     def test_incidental_substring_in_unrelated_content_does_not_trigger_taken(self):
         """中山的 QPid=84 太短，很容易在圖檔名裡撞到（place0841.png）。
         那不代表我們的場地被預約了 —— 只是巧合的字串。不該謊報成已訂。"""
         service = build_without_browser(ZhongshanSportsCenterWebService)
         html = '<img src="img/place0841.png">'
-        assert service.parse_slot_state(html, hour=20) == SLOT_UNKNOWN
+        assert service.parse_slot_state(html, hour=20, qpid=84) == SLOT_UNKNOWN
 
     def test_our_court_at_another_hour_reads_as_taken(self):
         """我們的場地確實出現在頁面上（Step3Action 呼叫），只是不在我們查詢的時段。
         那表示那個時段已經被訂走了。"""
         service = build_without_browser(ZhongshanSportsCenterWebService)
         html = '<a onclick="Step3Action(84, 19)"><img src="img/place01.png"></a>'
-        assert service.parse_slot_state(html, hour=20) == SLOT_TAKEN
+        assert service.parse_slot_state(html, hour=20, qpid=84) == SLOT_TAKEN
 
 
 class TestBrowserHeaders:
@@ -498,6 +518,9 @@ class RecordingSession:
         return FakeBookingResponse(self.body, self.headers)
 
 
+COURT = Court("羽球7-4", 1199)
+
+
 class TestBookingCourts:
     def test_sends_the_url_it_was_handed(self):
         """URL 在截止時刻之前就組好，開搶那一刻不做字串運算。"""
@@ -512,12 +535,31 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
         assert session.requested_urls == ["https://example.invalid/book"]
         assert attempt.success is True
         assert attempt.hour == 20
+
+    def test_booking_attempt_carries_the_court(self):
+        service = build_without_browser(ZhongzhengSportsCenterWebService)
+        session = RecordingSession()
+
+        async def scenario():
+            ready = asyncio.Event()
+            ready.set()
+            return await service.booking_courts(
+                session=session,
+                booking_url="https://example.invalid/book",
+                hour=20,
+                ready_event=ready,
+                court=Court("羽球7-2", 1197),
+            )
+
+        attempt = asyncio.run(scenario())
+        assert (attempt.court_name, attempt.qpid) == ("羽球7-2", 1197)
 
     def test_waits_for_the_event_before_sending(self):
         """task 要在倒數結束前就掛好，時間到只做 event.set()。"""
@@ -532,6 +574,7 @@ class TestBookingCourts:
                     booking_url="https://example.invalid/book",
                     hour=20,
                     ready_event=ready,
+                    court=COURT,
                 )
             )
             await asyncio.sleep(0.05)
@@ -554,6 +597,7 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
@@ -573,6 +617,7 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
@@ -591,6 +636,7 @@ class TestBookingCourts:
                 booking_url="https://example.invalid/book",
                 hour=20,
                 ready_event=ready,
+                court=COURT,
             )
 
         attempt = asyncio.run(scenario())
