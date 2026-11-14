@@ -8,6 +8,7 @@ cancelled from another thread right up to the instant the requests go out.
 import asyncio
 import logging
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -45,6 +46,13 @@ from badminton_bot.utils.timing import (
 # 每次執行的 log 都留一份，之後才有辦法回頭看實際搶場地當下發生了什麼。
 # 放在「文件」底下，打包後的使用者也找得到，不會跟著程式資料夾被覆蓋掉
 LOG_DIR = Path.home() / "Documents" / "badminton_bot_logs"
+
+# 「文件」寫不進去時（macOS 拒絕存取「文件」、Windows 受控資料夾存取）依序改用這些，
+# 否則程式根本無法啟動
+LOG_FALLBACK_DIRS = (
+    Path.home() / "badminton_bot_logs",
+    Path(tempfile.gettempdir()) / "badminton_bot_logs",
+)
 
 # 開搶前這麼久登入，太早登入有 session 過期的風險
 LOGIN_OFFSET = timedelta(minutes=-3)
@@ -472,6 +480,12 @@ class GrabRunner:
             self._cancel_delivered = True
             raise
 
+        # 最後幾秒的 busy-wait 不看 cancel_event：倒數走完時取消可能已被接受，
+        # 不擋在這裡的話，下一步（例如開 Chrome 登入）會照樣執行
+        if self._cancel_event.is_set():
+            self._cancel_delivered = True
+            raise Cancelled()
+
     async def run(self) -> list[BookingAttempt]:
         """Run the whole grab and return one attempt per target.
 
@@ -703,8 +717,33 @@ class GrabRunner:
         return attempts
 
 
+def _open_log_file(
+    log_dirs: Sequence[Path],
+) -> tuple[logging.FileHandler, list[tuple[Path, OSError]]]:
+    """Open a timestamped log file in the first directory that accepts one.
+
+    Returns:
+        tuple: the file handler, and every directory skipped with its error.
+
+    Raises:
+        OSError: no directory was writable; the last directory's error.
+    """
+    file_name = f"{datetime.now().strftime('%Y-%m-%dT%H%M%S')}.log"
+    skipped: list[tuple[Path, OSError]] = []
+    for log_dir in log_dirs:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            return logging.FileHandler(log_dir / file_name, encoding="utf-8"), skipped
+        except OSError as error:
+            skipped.append((log_dir, error))
+
+    raise skipped[-1][1]
+
+
 def set_logger(
-    log_dir: Path = LOG_DIR, extra_handlers: Sequence[logging.Handler] = ()
+    log_dir: Path = LOG_DIR,
+    extra_handlers: Sequence[logging.Handler] = (),
+    fallback_dirs: Sequence[Path] = LOG_FALLBACK_DIRS,
 ) -> Path:
     """Send log records to the console (when there is one), a timestamped file,
     and any extra handlers.
@@ -715,12 +754,17 @@ def set_logger(
         log_dir (Path, optional): directory for log files. Created if missing.
         extra_handlers (Sequence[logging.Handler], optional): further handlers,
             such as the GUI's queue handler.
+        fallback_dirs (Sequence[Path], optional): tried in order when log_dir
+            cannot be written to.
 
     Returns:
-        Path: the file this run is logging to.
+        Path: the file this run is logging to, which may be in a fallback dir.
+
+    Raises:
+        OSError: neither log_dir nor any fallback directory is writable.
     """
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{datetime.now().strftime('%Y-%m-%dT%H%M%S')}.log"
+    file_handler, skipped = _open_log_file([log_dir, *fallback_dirs])
+    log_path = Path(file_handler.baseFilename)
 
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     root_logger = logging.getLogger()
@@ -735,12 +779,17 @@ def set_logger(
     # 打包成視窗程式（沒有主控台）時 sys.stderr 是 None，StreamHandler 一寫就會炸
     if sys.stderr is not None:
         handlers.append(logging.StreamHandler())
-    handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    handlers.append(file_handler)
     handlers.extend(extra_handlers)
 
     for handler in handlers:
         handler.setFormatter(formatter)
         root_logger.addHandler(handler)
+
+    for skipped_dir, error in skipped:
+        logging.warning("無法寫入 log 資料夾 %s（%s）", skipped_dir, error)
+    if skipped:
+        logging.warning("log 改存在 %s", log_path.parent)
 
     return log_path
 

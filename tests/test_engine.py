@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -657,3 +658,122 @@ class TestCancelDuringCountdownUnwindsCleanly:
         assert session.closed
         assert not [w for w in caught if issubclass(w.category, ResourceWarning)]
         assert "Unclosed" not in caplog.text
+
+
+class TestCancelInsideTheSpinWindow:
+    """倒數最後幾秒在 busy-wait，cancel_event 只在粗睡時看；取消被接受就不能再往下走。"""
+
+    def test_cancel_in_the_last_seconds_before_login_never_opens_the_browser(
+        self, offline_engine
+    ):
+        from badminton_bot.engine import LOGIN_OFFSET
+
+        # 登入時刻在 2 秒後：0.5 秒時按取消，此時倒數已進入最後 5 秒的 busy-wait
+        runner = GrabRunner(make_config(open_in=-LOGIN_OFFSET + timedelta(seconds=2)))
+        results: list[bool] = []
+        threading.Timer(0.5, lambda: results.append(runner.cancel())).start()
+
+        with pytest.raises(Cancelled):
+            asyncio.run(runner.run())
+
+        assert results == [True]
+        assert FakeService.instances == []
+        assert runner.fired is False
+
+
+class TestLogoutFailureNeverHidesTheOutcome:
+    """搶完之後登出失敗，只能記一筆警告，不能把結果蓋掉。"""
+
+    @staticmethod
+    def _failing_logout(monkeypatch):
+        def broken_logout(self):
+            raise RuntimeError("模擬登出按鈕不見了")
+
+        monkeypatch.setattr(FakeService, "logout", broken_logout)
+
+    def test_attempts_are_still_returned(self, offline_engine, monkeypatch, caplog):
+        self._failing_logout(monkeypatch)
+
+        with caplog.at_level(logging.WARNING):
+            attempts = asyncio.run(GrabRunner(make_config()).run())
+
+        assert len(attempts) == 4
+        assert all(a.success is True for a in attempts)
+        assert "模擬登出按鈕不見了" in caplog.text
+
+    def test_a_cancel_is_still_reported_as_cancelled(self, offline_engine, monkeypatch):
+        self._failing_logout(monkeypatch)
+        runner_box: list[GrabRunner] = []
+
+        async def cancel_during_probe(*args, **kwargs):
+            runner_box[0].cancel()
+            await asyncio.sleep(5)
+
+        from badminton_bot import engine
+
+        monkeypatch.setattr(engine, "measure_server_clock", cancel_during_probe)
+        runner = GrabRunner(make_config(open_in=timedelta(minutes=1)))
+        runner_box.append(runner)
+
+        with pytest.raises(Cancelled):
+            asyncio.run(runner.run())
+
+
+class TestLogDirFallback:
+    """「文件」資料夾寫不進去（macOS 權限、Windows 受控資料夾存取）時，程式仍要能啟動。"""
+
+    @staticmethod
+    def _read_only_dir(tmp_path):
+        import os
+
+        locked = tmp_path / "Documents"
+        locked.mkdir()
+        locked.chmod(0o500)
+        if os.access(locked, os.W_OK):
+            pytest.skip("以 root 執行時唯讀資料夾仍可寫入")
+        return locked
+
+    def test_falls_back_to_the_next_writable_dir(self, tmp_path):
+        locked = self._read_only_dir(tmp_path)
+        fallback = tmp_path / "fallback"
+        try:
+            log_path = set_logger(
+                locked / "badminton_bot_logs", fallback_dirs=(fallback,)
+            )
+        finally:
+            locked.chmod(0o700)
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        assert log_path.parent == fallback
+        # 換了位置要講出來，使用者才知道 log 去哪裡找
+        text = log_path.read_text(encoding="utf-8")
+        assert str(locked / "badminton_bot_logs") in text
+        assert f"log 改存在 {fallback}" in text
+
+    def test_skips_every_unwritable_fallback(self, tmp_path):
+        locked = self._read_only_dir(tmp_path)
+        last = tmp_path / "last"
+        try:
+            log_path = set_logger(
+                locked / "a", fallback_dirs=(locked / "b", last)
+            )
+        finally:
+            locked.chmod(0o700)
+
+        assert log_path.parent == last
+
+    def test_raises_when_nothing_is_writable(self, tmp_path):
+        locked = self._read_only_dir(tmp_path)
+        try:
+            with pytest.raises(OSError):
+                set_logger(locked / "a", fallback_dirs=(locked / "b",))
+        finally:
+            locked.chmod(0o700)
+
+    def test_the_default_fallbacks_end_in_the_temp_dir(self):
+        import tempfile
+
+        from badminton_bot.engine import LOG_FALLBACK_DIRS
+
+        assert LOG_FALLBACK_DIRS[-1].parent == Path(tempfile.gettempdir())
