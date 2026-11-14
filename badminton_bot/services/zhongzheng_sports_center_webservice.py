@@ -48,12 +48,25 @@ class ZhongzhengSportsCenterWebService(SportsCenterWebService):
         else:
             return False
 
-    def _static_asset_urls(self) -> tuple[str, str]:
-        # 列表頁就是用這兩張圖標示可訂／已訂，所以它們確實存在於站上。
+    def _static_asset_urls(self) -> tuple[str, ...]:
+        # 2026-11-14 從列表頁 HTML 讀出的 15 個靜態資源，每條預熱連線各抓一個。
         # 預熱只需要連線建立起來 —— 就算路徑變了拿到 404，連線一樣是熱的。
         return (
             "https://bwd.xuanen.com.tw/img/place01.png",
             "https://bwd.xuanen.com.tw/img/place02.png",
+            "https://bwd.xuanen.com.tw/img/LOGO/logo_wd27.png",
+            "https://bwd.xuanen.com.tw/css/layout.css",
+            "https://bwd.xuanen.com.tw/css/funtitle.css",
+            "https://bwd.xuanen.com.tw/css/csspin/csspin.css",
+            "https://bwd.xuanen.com.tw/js/tablesorter/style.css",
+            "https://bwd.xuanen.com.tw/script/jquery-ui.min.css",
+            "https://bwd.xuanen.com.tw/script/jquery.layout-1.4.3.css",
+            "https://bwd.xuanen.com.tw/Scripts/sweetalert2.min.css",
+            "https://bwd.xuanen.com.tw/Scripts/sweetalert2.all.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery-3.6.0.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery-migrate-3.4.1.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery-ui-1.13.0.min.js",
+            "https://bwd.xuanen.com.tw/Scripts/jquery.layout-1.4.3.js",
         )
 
     def _generate_list_page_url(self, year: int, month: int, day: int) -> str:

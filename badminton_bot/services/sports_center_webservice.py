@@ -23,8 +23,10 @@ SLOT_AVAILABLE = "可訂"
 SLOT_TAKEN = "已訂"
 SLOT_UNKNOWN = "未知"
 
-# 連線池上限。只需要兩條熱連線，留餘裕給預熱與探測。
-CONNECTION_LIMIT = 10
+# 連線池上限。aiohttp 是 HTTP/1.1，一條連線一次只跑一個請求；
+# 開搶時最多 MAX_REQUESTS = 12 個請求同時送出，上限必須大於 12，
+# 否則部分請求會在開放瞬間排隊等連線。多出的留給探測與偵察。
+CONNECTION_LIMIT = 20
 
 # DNS 快取存活秒數，讓開搶那一刻不必再解析一次。
 DNS_CACHE_SECONDS = 300
@@ -441,19 +443,21 @@ class SportsCenterWebService(ABC):
             ),
         )
 
-    async def warm_up(self, session) -> list[WarmUpResult]:
-        """Open two read-only pages so two hot connections wait in the pool.
+    async def warm_up(self, session, count: int) -> list[WarmUpResult]:
+        """Open read-only assets so `count` hot connections wait in the pool.
 
         Everything the booking request would otherwise pay for at the opening
         instant — DNS, the TCP handshake, the TLS handshake — happens here.
 
         Args:
             session: the aiohttp session.
+            count (int): how many connections to warm, one per booking request
+                (never fewer than two).
 
         Returns:
             list[WarmUpResult]: one entry per warm-up URL, in URL order.
         """
-        urls = self._generate_warm_up_urls()
+        urls = self._generate_warm_up_urls(count)
 
         async def _open(url: str) -> WarmUpResult:
             try:
@@ -675,22 +679,26 @@ class SportsCenterWebService(ABC):
         return sorted({int(qpid) for qpid in bookable.findall(html)})
 
     @abstractmethod
-    def _static_asset_urls(self) -> tuple[str, str]:
-        """兩個靜態資源網址，用來預熱連線。由 Cloudflare 邊緣直接回，不碰應用伺服器。"""
+    def _static_asset_urls(self) -> tuple[str, ...]:
+        """靜態資源網址（互不相同），用來預熱連線。由 Cloudflare 邊緣直接回，不碰應用伺服器。"""
 
-    def _generate_warm_up_urls(self) -> tuple[str, ...]:
-        """Two URLs to open concurrently, leaving two hot connections behind.
+    def _generate_warm_up_urls(self, count: int) -> tuple[str, ...]:
+        """URLs to open concurrently, leaving one hot connection per request.
 
-        Two connections because the two booking requests each need one. Two
-        *different* URLs because a browser loading a page in parallel is
-        ordinary traffic, whereas the same URL fetched twice at once is not.
+        One connection per booking request because HTTP/1.1 runs one request
+        per connection. Every URL is *different* because a browser loading a
+        page in parallel is ordinary traffic, whereas the same URL fetched
+        many times at once is not.
 
         Static assets rather than the list page: warming up needs the
         connection, not the content, and the list page was measured taking
-        4-5 seconds — from T-10s that finished at T-4.6s, almost overrunning
-        its budget. An edge-served asset answers in tens of milliseconds.
+        4-5 seconds. An edge-served asset answers in tens of milliseconds.
+
+        Args:
+            count (int): number of booking requests about to be fired.
 
         Returns:
-            tuple[str, ...]: two static asset URLs.
+            tuple[str, ...]: max(2, min(count, assets available)) asset URLs.
         """
-        return self._static_asset_urls()
+        assets = self._static_asset_urls()
+        return assets[: max(2, min(count, len(assets)))]

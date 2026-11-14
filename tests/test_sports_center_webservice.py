@@ -342,17 +342,44 @@ class TestListPageUrl:
 
 
 class TestWarmUpUrls:
+    def test_warms_one_distinct_asset_per_request(self):
+        urls = build_without_browser(
+            ZhongzhengSportsCenterWebService
+        )._generate_warm_up_urls(count=12)
+        assert len(urls) == 12 and len(set(urls)) == 12
+        assert all(
+            u.startswith("https://bwd.xuanen.com.tw/") and "StepFlag" not in u
+            for u in urls
+        )
+
+    def test_never_warms_fewer_than_two(self):
+        urls = build_without_browser(
+            ZhongzhengSportsCenterWebService
+        )._generate_warm_up_urls(count=1)
+        assert len(urls) == 2
+
+    def test_caps_at_the_assets_available(self):
+        urls = build_without_browser(
+            ZhongshanSportsCenterWebService
+        )._generate_warm_up_urls(count=12)
+        assert len(urls) == 2
+
+    def test_pool_can_hold_every_request_at_once(self):
+        from badminton_bot.services.sports_center_webservice import CONNECTION_LIMIT
+
+        assert CONNECTION_LIMIT > 12
+
     def test_warms_two_different_pages(self):
         """兩條熱連線供兩個預約請求各用一條；兩個不同頁面併發載入是一般瀏覽行為。"""
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        urls = service._generate_warm_up_urls()
+        urls = service._generate_warm_up_urls(count=2)
         assert len(urls) == 2
         assert len(set(urls)) == 2
 
     def test_warm_up_never_touches_the_booking_action(self):
         for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
             service = build_without_browser(cls)
-            for url in service._generate_warm_up_urls():
+            for url in service._generate_warm_up_urls(count=2):
                 assert "StepFlag=25" not in url
 
 
@@ -653,7 +680,7 @@ class TestWarmUp:
         )
 
         results = asyncio.run(
-            service.warm_up(session=session)
+            service.warm_up(session=session, count=2)
         )
         assert len(results) == 2
         assert len(session.requested_urls) == 2
@@ -668,7 +695,7 @@ class TestWarmUp:
         )
 
         results = asyncio.run(
-            service.warm_up(session=session)
+            service.warm_up(session=session, count=2)
         )
         assert results[0].connection == "close"
         assert results[0].keep_alive == "timeout=5"
@@ -712,7 +739,7 @@ class TestWarmUp:
 
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         results = asyncio.run(
-            service.warm_up(session=ExplodingSession())
+            service.warm_up(session=ExplodingSession(), count=2)
         )
         assert all(result.ok is False for result in results)
 
@@ -853,19 +880,19 @@ class TestStaticAssetWarmUp:
     def test_warm_up_urls_are_two_distinct_static_assets(self):
         for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
             service = build_without_browser(cls)
-            urls = service._generate_warm_up_urls()
+            urls = service._generate_warm_up_urls(count=2)
             assert len(urls) == 2
             assert len(set(urls)) == 2
 
     def test_warm_up_never_touches_the_booking_action(self):
         for cls in (ZhongzhengSportsCenterWebService, ZhongshanSportsCenterWebService):
             service = build_without_browser(cls)
-            for url in service._generate_warm_up_urls():
+            for url in service._generate_warm_up_urls(count=2):
                 assert "StepFlag=25" not in url
 
     def test_warm_up_urls_are_not_the_slow_list_page(self):
         service = build_without_browser(ZhongzhengSportsCenterWebService)
-        for url in service._generate_warm_up_urls():
+        for url in service._generate_warm_up_urls(count=2):
             assert "module=net_booking" not in url
 
 
@@ -903,7 +930,7 @@ class TestWarmUpReadsBinaryAssets:
 
         service = build_without_browser(ZhongzhengSportsCenterWebService)
         session = BinarySession()
-        results = asyncio.run(service.warm_up(session=session))
+        results = asyncio.run(service.warm_up(session=session, count=2))
 
         assert all(result.ok for result in results)
         assert all(result.connection == "keep-alive" for result in results)

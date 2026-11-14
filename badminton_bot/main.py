@@ -474,7 +474,7 @@ async def main():
             # 倒數至預熱時機
             count_down(booking_date=upcoming_booking_date, offset=WARM_UP_OFFSET)
             warm_up_results = await run_with_deadline(
-                service.warm_up(session=session),
+                service.warm_up(session=session, count=2),
                 budget_seconds=WARM_UP_BUDGET_SECONDS,
                 label="連線預熱",
                 fallback=[],

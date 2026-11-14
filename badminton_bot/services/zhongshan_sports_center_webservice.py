@@ -42,7 +42,7 @@ class ZhongshanSportsCenterWebService(SportsCenterWebService):
         else:
             return False
 
-    def _static_asset_urls(self) -> tuple[str, str]:
+    def _static_asset_urls(self) -> tuple[str, ...]:
         # 列表頁就是用這兩張圖標示可訂／已訂，所以它們確實存在於站上。
         # 預熱只需要連線建立起來 —— 就算路徑變了拿到 404，連線一樣是熱的。
         return (
