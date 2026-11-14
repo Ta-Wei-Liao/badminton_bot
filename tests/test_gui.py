@@ -214,3 +214,16 @@ def test_days_follow_the_clock():
 
 def test_status_without_open_time_shows_the_stage():
     assert status_text("登入中", remaining=0.0, fired=False) == "登入中"
+
+
+def test_run_grab_reports_a_refused_selection_as_an_error():
+    """確認視窗開太久、時段在送出前開始了：引擎拒絕，使用者要看到原因，不是「未預期的錯誤」。"""
+
+    class RefusingRunner:
+        async def run(self):
+            raise ValueError("19:00 的時段已經過了")
+
+    events: queue.Queue = queue.Queue()
+    run_grab(RefusingRunner(), events)
+
+    assert drain(events)[-1] == ("error", "19:00 的時段已經過了")

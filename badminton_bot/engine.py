@@ -594,6 +594,13 @@ class GrabRunner:
             username=config.username, password=config.password
         ) as service:
             if service.login_status:
+                # 登入可能要十幾秒，期間跨過整點的時段已經開始，不能再送；
+                # 在 with 裡面拋，登出、關 Chrome 照常完成
+                validate_immediate(
+                    targets,
+                    datetime.now(TAIPEI),
+                    config.service_cls.booking_window_days,
+                )
                 referer = service._generate_list_page_url(
                     year=day.year, month=day.month, day=day.day
                 )

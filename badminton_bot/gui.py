@@ -152,7 +152,8 @@ def run_grab(runner: GrabRunner, events: queue.Queue) -> None:
         events.put(("done", asyncio.run(runner.run())))
     except Cancelled:
         events.put(("cancelled", None))
-    except (BrowserUnavailable, LoginFailed) as error:
+    except (BrowserUnavailable, LoginFailed, ValueError) as error:
+        # ValueError 是引擎拒絕這次的選擇（例如時段在送出前開始了），訊息本身就是原因
         events.put(("error", str(error)))
     except BaseException as error:
         # 不管背景執行緒怎麼結束都要回報，否則表單會永遠鎖住

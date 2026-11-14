@@ -857,3 +857,26 @@ class TestImmediateMode:
         assert service.session.booking_urls == []
         assert service.logged_out
         assert runner.fired is False
+
+
+class TestImmediateRecheckBeforeSending:
+    def test_a_slot_that_starts_during_login_is_not_sent(self, offline_engine, monkeypatch):
+        """登入可能要十幾秒，期間跨過整點的時段不能送出，但照樣要登出。"""
+        from badminton_bot import engine
+
+        real_validate = engine.validate_immediate
+        calls: list[int] = []
+
+        def validate_then_expire(targets, now, window_days):
+            calls.append(1)
+            if len(calls) > 1:
+                raise ValueError("19:00 的時段已經過了")
+            real_validate(targets, now, window_days)
+
+        monkeypatch.setattr(engine, "validate_immediate", validate_then_expire)
+        with pytest.raises(ValueError, match="已經過了"):
+            asyncio.run(GrabRunner(make_immediate_config()).run())
+        (service,) = FakeService.instances
+        assert service.session.booking_urls == []
+        assert service.logged_out
+        assert len(calls) == 2
